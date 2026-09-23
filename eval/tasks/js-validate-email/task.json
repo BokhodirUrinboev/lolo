@@ -1,0 +1,1 @@
+{ "task": "createUser(name, email) in src/users.js must throw an Error with message \"invalid email\" when email is not like x@y.z, and \"name required\" when name is empty or only spaces.", "check": "node --test" }

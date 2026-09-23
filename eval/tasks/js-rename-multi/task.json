@@ -1,0 +1,1 @@
+{ "task": "Rename the function calcTotal to computeTotal everywhere in src/ (definition, export and all uses).", "check": "! grep -rq calcTotal src && node --test" }

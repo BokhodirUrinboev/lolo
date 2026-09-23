@@ -1,0 +1,1 @@
+{ "task": "Implement median(xs) in stats.py. For an even number of values return the mean of the two middle values. Raise ValueError for an empty list. Do not modify the input list.", "check": "python3 -m unittest -q" }

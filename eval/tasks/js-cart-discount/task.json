@@ -1,0 +1,1 @@
+{ "task": "Add a method applyDiscount(percent) to Cart that returns total() reduced by the given percentage (10 means 10% off). Add a test for it in test/cart.test.js.", "check": "node --test" }

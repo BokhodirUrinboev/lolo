@@ -1,0 +1,1 @@
+{ "task": "Cart.total() ignores item quantity. Fix it so the tests pass.", "check": "node --test" }

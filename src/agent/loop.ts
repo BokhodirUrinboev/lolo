@@ -1,0 +1,502 @@
+import { Budget, estimateTokens } from "../context/budget";
+import { collectContext } from "../context/collectors";
+import { buildRepoMap } from "../context/repoMap";
+import { environmentInfo } from "../context/environment";
+import { expandMentions } from "../context/mentions";
+import { detectChecks } from "../context/projectChecks";
+import { loadRules, Rules } from "../context/rules";
+import { Checkpoints } from "../edit/checkpoints";
+import { EditState } from "../edit/formats";
+import type { Host } from "../host/types";
+import { ChatMessage, ChatResponse, LLMProvider, ProviderError } from "../providers/types";
+import { formatDiagnostics } from "../tools/diagnostics";
+import { truncateOutput } from "../tools/output";
+import { Action, AgentMode, ALL_TOOLS, ToolRegistry } from "../tools/registry";
+import type { ToolContext, ToolDef, ToolResult } from "../tools/types";
+import { History, mergeConsecutive } from "./compaction";
+import { makePlan } from "./planner";
+import { PLAN_REQUEST, QUESTION_NOTE, systemPrompt, taskMessage, todoPrompt } from "./prompts";
+import { TrajectoryLog } from "./trajectoryLog";
+
+export type AgentEvent =
+  | { type: "status"; text: string }
+  | { type: "checkpoint"; id: string }
+  | { type: "plan"; todos: string[]; goal?: string }
+  | { type: "todo"; index: number; status: "active" | "done" | "failed" }
+  | { type: "thought"; text: string }
+  | { type: "tool"; tool: string; args: Record<string, unknown>; result: ToolResult }
+  | { type: "invalid"; error: string }
+  | { type: "verify"; ok: boolean; output: string }
+  | { type: "tokens"; prompt: number; output: number; ctx: number }
+  /** Live view of the reply being generated: the thought, and in Ask mode the answer. */
+  | { type: "streaming"; thought: string; answer?: string }
+  | { type: "done"; result: RunResult }
+  | { type: "error"; message: string };
+
+export interface AgentDeps {
+  host: Host;
+  provider: LLMProvider;
+  commandAllowlist: string[];
+  onEvent?: (e: AgentEvent) => void;
+  /** Lets the user edit the plan before execution; return undefined to cancel. */
+  reviewPlan?: (todos: string[]) => Promise<string[] | undefined>;
+  maxStepsPerTodo?: number;
+  maxRepairs?: number;
+  /** Write .agent/trajectories/<run>.jsonl (default true). */
+  trajectory?: boolean;
+}
+
+export interface RunStats {
+  steps: number;
+  /** Model replies requested (incl. retries): denominator for tool-call validity. */
+  modelCalls: number;
+  toolCalls: number;
+  invalidCalls: number;
+  editCalls: number;
+  editsApplied: number;
+  /** Writes identical to the current file; excluded from editCalls. */
+  noopEdits: number;
+  promptTokens: number;
+  outputTokens: number;
+  ms: number;
+}
+
+export interface RunResult {
+  status: "done" | "failed" | "cancelled" | "planned";
+  summary: string;
+  todos: string[];
+  changed: string[];
+  checkpoint?: string;
+  stats: RunStats;
+  logFile?: string;
+}
+
+export interface RunOptions {
+  /** Earlier turns of the chat, rendered as text, so follow-up messages have context. */
+  conversation?: string;
+  /** Execute this plan as-is (e.g. "Run this plan" after Plan mode): no planner call, no review. */
+  plan?: { goal?: string; todos: string[] };
+}
+
+class Cancelled extends Error {}
+
+/** Value of a (possibly unterminated) string field in partial JSON, e.g. while streaming. */
+export function partialJsonString(json: string, field: string): string | undefined {
+  const m = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`).exec(json);
+  if (!m) return undefined;
+  return m[1].replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, e: string) =>
+    e[0] === "u" ? String.fromCharCode(parseInt(e.slice(1), 16)) : e === "n" ? "\n" : e === "t" ? "\t" : e,
+  ).replace(/\\$/, "");
+}
+
+/** Stop and ask the user after this many consecutive failed or invalid steps. */
+const MAX_CONSECUTIVE_FAILURES = 4;
+/** Extra attempts after a model generation failure. */
+const MODEL_RETRIES = 2;
+
+export class Agent {
+  private readonly registry = new ToolRegistry();
+
+  constructor(private readonly deps: AgentDeps) {}
+
+  async run(task: string, mode: AgentMode, signal?: AbortSignal, opts: RunOptions = {}): Promise<RunResult> {
+    const { host, provider } = this.deps;
+    const profile = provider.profile;
+    const started = Date.now();
+    const stats: RunStats = { steps: 0, modelCalls: 0, toolCalls: 0, invalidCalls: 0, editCalls: 0, editsApplied: 0, noopEdits: 0, promptTokens: 0, outputTokens: 0, ms: 0 };
+    const changed = new Set<string>();
+    const emit = (e: AgentEvent) => this.deps.onEvent?.(e);
+    const runId = new Date().toISOString().replace(/[:.]/g, "-");
+    const log = this.deps.trajectory === false ? undefined : new TrajectoryLog(host.root, runId);
+    let todos: string[] = [];
+    let checkpoint: string | undefined;
+
+    const finish = (status: RunResult["status"], summary: string): RunResult => {
+      stats.ms = Date.now() - started;
+      const result: RunResult = { status, summary, todos, changed: [...changed], checkpoint, stats, logFile: log?.file };
+      log?.write("run_end", { status, summary, changed: result.changed, stats });
+      emit({ type: "done", result });
+      return result;
+    };
+
+    try {
+      log?.write("run_start", { task, mode, model: provider.model, profile });
+
+      // 2. Context: stable parts go into the system message, per-run parts into the task message.
+      emit({ type: "status", text: "Collecting context" });
+      const budget = Budget.for(profile);
+      const rules = await loadRules(host);
+      const editor = await host.editorContext?.();
+      const mentions = await expandMentions(host, task, Math.floor(budget.tokens("files") / 3), editor?.terminalOutput);
+      const focus = [...mentions.files, editor?.activeFile?.path, ...(editor?.openTabs ?? [])].filter((p): p is string => !!p);
+      const repoMap = await buildRepoMap(host, budget.tokens("map"), focus, task);
+      const modeTools = ALL_TOOLS.filter(
+        (t) =>
+          (mode === "agent" || t.kind === "read" || t.kind === "control") &&
+          (t.name !== "done" || mode !== "ask"),
+      );
+      const system = systemPrompt({ mode, toolMode: profile.toolMode, environment: await environmentInfo(), toolList: this.registry.describe(modeTools), rules: budget.fit("rules", rules.text), verifyCommands: rules.verifyCommands, repoMap });
+      const collected = await collectContext(host, editor, Math.floor(budget.tokens("files") / 3));
+      const context = [mentions.context, collected].filter(Boolean).join("\n\n");
+      const prefix: ChatMessage[] = [
+        { role: "system", content: system },
+        { role: "user", content: taskMessage(task, context, opts.conversation) },
+      ];
+      const history = new History();
+
+      // 3. Plan. The planner also classifies the message: chat → reply, question → read-only answer, task → todos.
+      let execMode = mode;
+      if (mode === "ask") {
+        todos = [task];
+      } else if (opts.plan?.todos.length) {
+        // Preset plan: recorded as if the planner produced it, so the history format is unchanged.
+        todos = opts.plan.todos.slice(0, 6);
+        const content = JSON.stringify({ kind: "task", reply: "", goal: opts.plan.goal ?? "", todos });
+        history.setPreamble([{ role: "user", content: PLAN_REQUEST }, { role: "assistant", content }]);
+        history.note(todoPrompt(0, todos));
+        emit({ type: "plan", todos, goal: opts.plan.goal });
+      } else {
+        emit({ type: "status", text: "Planning" });
+        const plan = await makePlan(provider, prefix, signal, task);
+        log?.llm("plan", [...prefix, plan.messages[0]], plan.messages[1].content, {});
+        log?.write("classified", { kind: plan.kind });
+        if (plan.kind === "chat") return finish("done", plan.reply);
+        if (plan.kind === "question") {
+          execMode = "ask";
+          todos = [task];
+          history.setPreamble(plan.messages);
+          history.note(QUESTION_NOTE);
+          emit({ type: "status", text: "Answering" });
+        } else {
+          todos = plan.todos;
+          emit({ type: "plan", todos, goal: plan.goal });
+          if (mode === "plan") return finish("planned", todos.map((t, i) => `${i + 1}. ${t}`).join("\n"));
+          const reviewed = this.deps.reviewPlan ? await this.deps.reviewPlan(todos) : todos;
+          if (!reviewed?.length) return finish("cancelled", "Plan rejected.");
+          if (reviewed.join("\n") !== todos.join("\n")) {
+            todos = reviewed;
+            plan.messages[1] = { role: "assistant", content: JSON.stringify({ kind: plan.kind, reply: "", goal: plan.goal, todos }) };
+            emit({ type: "plan", todos });
+          }
+          history.setPreamble(plan.messages);
+          history.note(todoPrompt(0, todos));
+        }
+      }
+
+      // Checkpoint before anything can write (only once the message turned out to be a task).
+      if (execMode === "agent") {
+        try {
+          checkpoint = (await new Checkpoints(host.root).create(`before: ${task.slice(0, 100)}`)).id;
+          emit({ type: "checkpoint", id: checkpoint });
+        } catch (e) {
+          const go = await host.confirm(`Could not create a checkpoint (${(e as Error).message.split("\n")[0]}). Continue without one?`);
+          if (!go) return finish("cancelled", "No checkpoint; run cancelled.");
+        }
+      }
+
+      // 4. Execute todos.
+      const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: this.deps.commandAllowlist, signal, readOnly: execMode === "ask" };
+      const summaries: string[] = [];
+      for (let i = 0; i < todos.length; i++) {
+        emit({ type: "todo", index: i, status: "active" });
+        const outcome = await this.runTodo(i, todos, execMode, { prefix, history, ctx, rules, budget, stats, changed, emit, log, signal });
+        if (!outcome.ok) {
+          emit({ type: "todo", index: i, status: "failed" });
+          return finish("failed", [...summaries, `Stopped at todo ${i + 1} (${todos[i]}): ${outcome.summary}`].join("\n"));
+        }
+        emit({ type: "todo", index: i, status: "done" });
+        summaries.push(execMode === "ask" || todos.length === 1 ? outcome.summary : `${i + 1}. ${outcome.summary}`);
+        if (i + 1 < todos.length) history.note(todoPrompt(i + 1, todos));
+      }
+      return finish("done", summaries.join("\n"));
+    } catch (e) {
+      if (e instanceof Cancelled || signal?.aborted || (e as Error).name === "AbortError") return finish("cancelled", "Cancelled.");
+      emit({ type: "error", message: (e as Error).message });
+      log?.write("error", { message: (e as Error).message, stack: (e as Error).stack });
+      return finish("failed", `Error: ${(e as Error).message}`);
+    }
+  }
+
+  private async runTodo(
+    index: number,
+    todos: string[],
+    mode: AgentMode,
+    s: {
+      prefix: ChatMessage[];
+      history: History;
+      ctx: ToolContext;
+      rules: Rules;
+      budget: Budget;
+      stats: RunStats;
+      changed: Set<string>;
+      emit: (e: AgentEvent) => void;
+      log?: TrajectoryLog;
+      signal?: AbortSignal;
+    },
+  ): Promise<{ ok: boolean; summary: string }> {
+    const { history, ctx, stats, emit, log } = s;
+    const { host } = this.deps;
+    const maxSteps = this.deps.maxStepsPerTodo ?? 15;
+    const maxRepairs = this.deps.maxRepairs ?? 3;
+    let repairs = 0;
+    let failures = 0;
+    let repeats = 0;
+    // Calls made since the last successful write; a repeat within this window is a loop
+    // (catches A-B-A-B cycles, while re-reading a file after editing it stays allowed).
+    let seen = new Set<string>();
+    let changedInTodo = false;
+    let noopStreak = 0;
+    /** Project checks after this todo changed files: true when they pass (or, if allowed, when there are none). */
+    const checksPass = async (allowNoChecks: boolean) => {
+      if (!changedInTodo) return false;
+      const checks = s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host);
+      if (!checks.length) return allowNoChecks;
+      return !(await this.verify(checks, emit));
+    };
+    const completeAuto = (why: string) => {
+      const summary = `Completed: ${todos[index]}.`;
+      log?.write("todo_done", { index, summary, auto: why });
+      return { ok: true, summary };
+    };
+    /**
+     * The model is stuck. Small models often keep "improving" after the work is done,
+     * so first check the result: if the checks pass the todo is complete. Otherwise
+     * ask the user (interactive hosts) or give up.
+     */
+    const onStuck = async (problem: string, failSummary: string) => {
+      if (await checksPass(false)) return completeAuto("stuck, but checks pass");
+      const go = await this.unstick(index, todos, history, problem);
+      failures = 0;
+      repeats = 0;
+      seen = new Set();
+      return go ? undefined : { ok: false, summary: failSummary };
+    };
+    // History may use what the window leaves after the fixed prefix and the output reserve.
+    const prefixTokens = s.prefix.reduce((n, m) => n + estimateTokens(m.content), 0);
+    const historyBudget = Math.min(s.budget.conversation, s.budget.ctx - s.budget.tokens("output") - prefixTokens);
+
+    for (let step = 0; step < maxSteps; step++) {
+      if (s.signal?.aborted) throw new Cancelled();
+      stats.steps++;
+
+      const compacted = history.compactIfNeeded(historyBudget);
+      if (compacted) log?.write("compaction", { turns: compacted });
+
+      const enabled = this.registry.enabled(mode, ctx);
+      // Built exactly like the planner call, so the planner's prefix is reused from the KV cache.
+      const messages = mergeConsecutive([...s.prefix, ...history.messages()]);
+      const t0 = Date.now();
+      const res = await this.callModel(messages, enabled, stats, emit, s.signal);
+      stats.promptTokens += res.promptTokens ?? 0;
+      stats.outputTokens += res.outputTokens ?? 0;
+      emit({ type: "tokens", prompt: res.promptTokens ?? 0, output: res.outputTokens ?? 0, ctx: ctx.profile.ctx });
+      log?.llm("step", messages, res.content, { ms: Date.now() - t0, promptTokens: res.promptTokens, outputTokens: res.outputTokens, tools: enabled.map((t) => t.name) });
+
+      if (res.degenerate) {
+        stats.invalidCalls++;
+        failures++;
+        const advice = "Your reply degenerated into repeating itself and was cut off. Take a smaller step: change a few lines with edit instead of rewriting a whole file.";
+        emit({ type: "invalid", error: "model output degenerated; asked for a smaller step" });
+        history.add("(no reply)", advice, "reply degenerated");
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          const end = await onStuck("the model's replies keep degenerating", "the model's replies keep degenerating");
+          if (end) return end;
+        }
+        continue;
+      }
+      // Parse + validate.
+      const parsed = this.registry.parse(res.content);
+      if ("error" in parsed) {
+        stats.invalidCalls++;
+        failures++;
+        emit({ type: "invalid", error: parsed.error });
+        const example = this.registry.render({ thought: "why", tool: "read_file", args: { path: "src/a.ts" } }, ctx.profile.toolMode);
+        history.add(res.content, `Error: ${parsed.error} Reply with exactly one tool call, e.g.:\n${example}`);
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          const end = await onStuck(parsed.error, "too many invalid replies");
+          if (end) return end;
+        }
+        continue;
+      }
+      const action: Action = parsed.action;
+      // History keeps the mode's own format: models imitate whatever format they see there.
+      const assistant = this.registry.render(action, ctx.profile.toolMode);
+      if (action.thought) emit({ type: "thought", text: action.thought });
+      stats.toolCalls++;
+
+      const checked = await this.registry.check(action, enabled, ctx);
+      if (!checked.ok) {
+        stats.invalidCalls++;
+        failures++;
+        emit({ type: "invalid", error: checked.error });
+        log?.write("invalid", { action, error: checked.error });
+        history.add(assistant, `Error: ${checked.error}`, `${action.tool}: rejected (${checked.error.split(".")[0]})`);
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          const end = await onStuck(checked.error, "too many failed steps");
+          if (end) return end;
+        }
+        continue;
+      }
+      const { tool, args } = checked;
+
+      // Stuck detection: a call already made since the last write → switch strategy instead of executing it again.
+      const key = tool.name + JSON.stringify(args, Object.keys(args).sort());
+      if (seen.has(key)) {
+        repeats++;
+        let msg = "You already made exactly this call and got its result above. Do something different.";
+        if (tool.kind === "write" && typeof args.path === "string") {
+          ctx.edits.forceLineRange(args.path);
+          msg += ` ${args.path} is now in line mode: read_file shows line numbers, then use edit_lines.`;
+        }
+        log?.write("stuck", { action, repeats });
+        history.add(assistant, msg, `${tool.name}: repeated`);
+        if (repeats >= 3) {
+          const end = await onStuck("repeating the same actions", "stuck repeating the same actions");
+          if (end) return end;
+        }
+        continue;
+      }
+      seen.add(key);
+
+      // done: verify the todo's changes before accepting.
+      if (tool.name === "done" || tool.name === "answer") {
+        const summary = String(args.summary ?? args.text);
+        // Checks from rules, else inferred from project files (detected now, so projects created in this run count).
+        const checks = changedInTodo ? (s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host)) : [];
+        if (checks.length) {
+          const failed = await this.verify(checks, emit);
+          if (failed) {
+            repairs++;
+            log?.write("verify", { ok: false, repairs });
+            if (repairs > maxRepairs) return { ok: false, summary: `verification still failing after ${maxRepairs} repair attempts` };
+            history.add(assistant, `Not done yet: verification failed.\n${failed}\nFix the cause (attempt ${repairs}/${maxRepairs}), then call done again.`, "done: verification failed");
+            continue;
+          }
+          log?.write("verify", { ok: true });
+        }
+        history.add(assistant, "Todo complete.", `done: ${summary.slice(0, 120)}`);
+        log?.write("todo_done", { index, summary });
+        return { ok: true, summary };
+      }
+
+      // Execute.
+      if (tool.kind === "write") {
+        stats.editCalls++;
+        // Re-reading after any write attempt (even a rejected one) is legitimate.
+        for (const k of seen) if (k.startsWith("read_file")) seen.delete(k);
+      }
+      const result = await tool.run(args, ctx);
+      if (result.noop) {
+        stats.editCalls--;
+        stats.noopEdits++;
+        noopStreak++;
+      } else if (tool.kind === "write") {
+        noopStreak = 0;
+      }
+      log?.write("tool", { tool: tool.name, args, ok: result.ok, summary: result.summary, changed: result.changed });
+      emit({ type: "tool", tool: tool.name, args, result });
+      failures = result.ok ? 0 : failures + 1;
+
+      let observation = result.output;
+      if (result.changed?.length) {
+        stats.editsApplied++;
+        changedInTodo = true;
+        result.changed.forEach((f) => s.changed.add(f));
+        seen = new Set();
+        // Verify: fresh diagnostics for the files just written.
+        const errors = (await host.diagnostics(result.changed)).filter((d) => d.severity === "error");
+        if (errors.length) {
+          repairs++;
+          emit({ type: "verify", ok: false, output: formatDiagnostics(errors) });
+          if (repairs > maxRepairs) return { ok: false, summary: `errors remain after ${maxRepairs} repair attempts:\n${formatDiagnostics(errors, 10)}` };
+          observation += `\n\nThe change introduced errors (repair attempt ${repairs}/${maxRepairs}):\n${formatDiagnostics(errors)}`;
+        } else {
+          repairs = 0;
+        }
+      }
+      history.add(assistant, observation, result.summary);
+      // The model keeps "editing" without changing anything: the work is likely done but it
+      // doesn't know. Check it ourselves and close the todo if the checks pass.
+      if (noopStreak >= 2) {
+        noopStreak = 0;
+        if (await checksPass(true)) return completeAuto("no-op edits, checks pass");
+      }
+      if (failures >= MAX_CONSECUTIVE_FAILURES) {
+        const end = await onStuck(result.summary, "too many failed steps");
+        if (end) return end;
+      }
+    }
+    return { ok: false, summary: `no result after ${maxSteps} steps` };
+  }
+
+  /**
+   * One model call. Generation failures (e.g. Ollama aborting a repetition loop) are
+   * retried at a higher temperature; HTTP/connection errors are not.
+   */
+  private async callModel(
+    messages: ChatMessage[],
+    enabled: ToolDef[],
+    stats: RunStats,
+    emit: (e: AgentEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse & { degenerate?: boolean }> {
+    const { provider } = this.deps;
+    const mode = provider.profile.toolMode;
+    const schema = mode === "schema" ? this.registry.actionSchema(enabled) : undefined;
+    const tools = mode === "native" ? this.registry.toolSpecs(enabled) : undefined;
+    for (let attempt = 0; ; attempt++) {
+      let partial = "";
+      let lastEmit = 0;
+      const onToken = (delta: string) => {
+        partial += delta;
+        const now = Date.now();
+        if (now - lastEmit < 100) return;
+        lastEmit = now;
+        const thought = partialJsonString(partial, "thought") ?? /<thought>([\s\S]*?)(?:<\/thought>|$)/.exec(partial)?.[1] ?? (mode === "native" ? partial : undefined);
+        if (thought !== undefined) emit({ type: "streaming", thought, answer: partialJsonString(partial, "text") ?? partialJsonString(partial, "summary") });
+      };
+      stats.modelCalls++;
+      try {
+        const res = await provider.chat({
+          messages,
+          schema,
+          tools,
+          signal,
+          onToken,
+          temperature: provider.profile.temperature + attempt * 0.3,
+          repeatPenalty: attempt ? 1.1 + attempt * 0.1 : undefined,
+        });
+        // Native tool calls are normalized to the JSON action form, so parsing and history are mode-independent.
+        const call = res.toolCalls?.[0];
+        return call ? { ...res, content: JSON.stringify({ thought: res.content.trim(), action: { tool: call.name, args: call.arguments } }) } : res;
+      } catch (e) {
+        const retryable = e instanceof ProviderError && e.status === undefined && !signal?.aborted;
+        if (!retryable) throw e;
+        // Still degenerate after retries: not fatal. An empty reply becomes an invalid step with advice.
+        if (attempt >= MODEL_RETRIES) return { content: "", degenerate: true };
+        stats.invalidCalls++;
+        emit({ type: "invalid", error: `${(e as Error).message}; retrying` });
+      }
+    }
+  }
+
+  /** Runs verify commands from rules; returns failure text, or undefined when all pass. */
+  private async verify(commands: string[], emit: (e: AgentEvent) => void): Promise<string | undefined> {
+    for (const cmd of commands) {
+      const r = await this.deps.host.runCommand(cmd, undefined, { timeoutMs: 300_000 }); // first build may restore packages
+      const output = `$ ${cmd}\nexit code ${r.exitCode}\n${truncateOutput(r.output, 80)}`;
+      emit({ type: "verify", ok: r.exitCode === 0, output });
+      if (r.exitCode !== 0) return output;
+    }
+    return undefined;
+  }
+
+  /** Asks the user for guidance when the model is stuck. Returns false to give up. */
+  private async unstick(index: number, todos: string[], history: History, problem: string): Promise<boolean> {
+    if (!this.deps.host.interactive) return false;
+    const answer = await this.deps.host.askUser(`The agent is stuck on "${todos[index]}" (${problem.split("\n")[0]}). Any guidance? Leave empty to stop.`);
+    if (!answer?.trim()) return false;
+    history.note(`User guidance: ${answer.trim()}`);
+    return true;
+  }
+}

@@ -1,0 +1,1 @@
+{ "task": "Paging.PageCount(totalItems, pageSize) in Paging.cs returns the wrong number of pages when totalItems is not a multiple of pageSize (e.g. 11 items, size 5 must be 3 pages). Fix it. 0 items is 0 pages; pageSize <= 0 must throw ArgumentOutOfRangeException.", "check": "dotnet run --project . -v q" }

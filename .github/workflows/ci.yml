@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      eval:
+        description: Run the eval against Ollama (slow; pulls a ~5 GB model)
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: VS Code smoke test
+        run: xvfb-run -a node scripts/vscode-smoke.mjs
+
+  eval:
+    if: github.event_name == 'workflow_dispatch' && inputs.eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "10.0.x" }
+      - run: npm ci && npm run build
+      - name: Ollama + model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama pull qwen2.5-coder:7b
+          printf 'FROM qwen2.5-coder:7b\nPARAMETER num_ctx 32768\n' > Modelfile
+          ollama create qwen2.5-coder-32k -f Modelfile
+      - run: node dist/eval.js run --runs 2
+      - uses: actions/upload-artifact@v4
+        with: { name: eval-results, path: eval/results }

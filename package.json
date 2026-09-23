@@ -1,0 +1,237 @@
+{
+  "name": "local-agent",
+  "displayName": "Local Agent",
+  "description": "Local-first AI coding agent for small local models (Ollama, OpenAI-compatible).",
+  "version": "0.1.0",
+  "publisher": "local-agent",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "localAgent.runTask",
+        "title": "Run Task",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.ask",
+        "title": "Ask",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.plan",
+        "title": "Plan Only",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.cancel",
+        "title": "Cancel Run",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.inlineEdit",
+        "title": "Edit Selection",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.restoreCheckpoint",
+        "title": "Restore Checkpoint",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.toggleAutocomplete",
+        "title": "Toggle Autocomplete",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.diff.acceptAll",
+        "title": "Accept All Changes",
+        "category": "Local Agent"
+      },
+      {
+        "command": "localAgent.diff.rejectAll",
+        "title": "Reject All Changes",
+        "category": "Local Agent"
+      }
+    ],
+    "configuration": {
+      "title": "Local Agent",
+      "properties": {
+        "localAgent.provider": {
+          "type": "string",
+          "enum": [
+            "ollama",
+            "openai"
+          ],
+          "default": "ollama",
+          "description": "API flavour of the endpoint."
+        },
+        "localAgent.endpoint": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama base URL, or OpenAI-compatible base URL ending in /v1."
+        },
+        "localAgent.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for OpenAI-compatible endpoints."
+        },
+        "localAgent.model": {
+          "type": "string",
+          "default": "qwen2.5-coder-32k:latest"
+        },
+        "localAgent.profiles": {
+          "type": "array",
+          "default": [],
+          "description": "Model profile overrides. Each item needs `match` (model id prefix) plus any ModelProfile fields."
+        },
+        "localAgent.autoApproveEdits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Apply edits without diff review (a checkpoint is still taken)."
+        },
+        "localAgent.commandAllowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "dotnet build",
+            "dotnet test",
+            "npm test",
+            "npm run build",
+            "npm run lint",
+            "npx tsc",
+            "git status",
+            "git diff",
+            "git log",
+            "ls",
+            "cat",
+            "pwd"
+          ],
+          "description": "Command prefixes run_command may execute without asking."
+        },
+        "localAgent.maxStepsPerTodo": {
+          "type": "number",
+          "default": 15
+        },
+        "localAgent.reviewPlan": {
+          "type": "boolean",
+          "default": false,
+          "description": "Stop for plan review (edit/drop steps) before every Agent run. Off by default: use Plan mode to review a plan, then Run this plan."
+        },
+        "localAgent.autocomplete.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inline (ghost text) completions via the model's FIM tokens."
+        },
+        "localAgent.autocomplete.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model for autocomplete (e.g. qwen2.5-coder:1.5b, much faster on CPU). Empty: use localAgent.model."
+        },
+        "localAgent.autocomplete.debounceMs": {
+          "type": "number",
+          "default": 250
+        },
+        "localAgent.autocomplete.maxTokens": {
+          "type": "number",
+          "default": 128
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "localAgent",
+          "title": "Local Agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "localAgent": [
+        {
+          "type": "webview",
+          "id": "localAgent.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "localAgent.diff.acceptAll",
+          "when": "localAgent.diffPending"
+        },
+        {
+          "command": "localAgent.diff.rejectAll",
+          "when": "localAgent.diffPending"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "localAgent.inlineEdit",
+        "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus && !localAgent.diffPending"
+      },
+      {
+        "command": "localAgent.diff.acceptAll",
+        "key": "tab",
+        "when": "editorTextFocus && localAgent.diffPending && !suggestWidgetVisible && !inlineSuggestionVisible"
+      },
+      {
+        "command": "localAgent.diff.rejectAll",
+        "key": "escape",
+        "when": "editorTextFocus && localAgent.diffPending && !suggestWidgetVisible && !inlineSuggestionVisible"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs && vite build --logLevel warn",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p src/ui/webview",
+    "test": "vitest run",
+    "test:vscode": "npm run build && node scripts/vscode-smoke.mjs",
+    "agent": "node dist/cli.js",
+    "eval": "node dist/eval.js",
+    "package": "node esbuild.mjs --production && vite build --logLevel warn && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/vscode": "1.93.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "@vscode/test-electron": "^3.1.0",
+    "dompurify": "^3.4.15",
+    "esbuild": "^0.28.2",
+    "marked": "^18.0.14",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  },
+  "dependencies": {
+    "@vscode/ripgrep": "^1.18.0",
+    "@vscode/tree-sitter-wasm": "^0.3.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  },
+  "private": true
+}

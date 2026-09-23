@@ -1,0 +1,2 @@
+- C#: keep the Demo namespace.
+- verify: dotnet build -v q -nologo

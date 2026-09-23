@@ -1,0 +1,58 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { IGNORED_DIRS } from "./paths";
+import { fail, ok, ToolDef } from "./types";
+
+const MAX_MATCHES = 60;
+
+/** Host-provided rg (VS Code ships one) → @vscode/ripgrep platform package → rg on PATH. */
+export function findRg(hostPath?: string): string {
+  if (hostPath && existsSync(hostPath)) return hostPath;
+  try {
+    const req = createRequire(__filename);
+    const bin = process.platform === "win32" ? "rg.exe" : "rg";
+    return req.resolve(`@vscode/ripgrep-${process.platform}-${process.arch}/bin/${bin}`);
+  } catch {
+    return "rg";
+  }
+}
+
+export const search: ToolDef<{ query: string; path?: string; regex?: boolean }> = {
+  name: "search",
+  kind: "read",
+  description: "Search file contents (ripgrep). Literal text by default; set regex=true for a regular expression. Optional path limits the folder or file.",
+  params: {
+    type: "object",
+    properties: { query: { type: "string", minLength: 1 }, path: { type: "string" }, regex: { type: "boolean" } },
+    required: ["query"],
+  },
+  async check(a, ctx) {
+    return a.path && !(await ctx.host.stat(a.path)) ? `"${a.path}" does not exist.` : undefined;
+  },
+  async run(a, ctx) {
+    const args = ["--line-number", "--no-heading", "--color=never", "--max-columns=200", "--max-columns-preview", "--smart-case"];
+    if (!a.regex) args.push("--fixed-strings");
+    for (const d of IGNORED_DIRS) args.push("--glob", `!${d}/`);
+    args.push("--", a.query, a.path ?? ".");
+    const { code, stdout, stderr } = await exec(findRg(ctx.host.rgPath?.()), args, ctx.host.root, ctx.signal);
+    if (code === 2 && !stdout) return fail(`search error: ${stderr.trim()}`);
+    const lines = stdout.split("\n").filter(Boolean).map((l) => l.replace(/^\.\//, ""));
+    if (!lines.length) return ok(`No matches for "${a.query}".`, `search "${a.query}": no matches`);
+    const files = new Set(lines.map((l) => l.slice(0, l.indexOf(":"))));
+    const more = lines.length > MAX_MATCHES ? `\n[${lines.length - MAX_MATCHES} more matches; narrow the query or path]` : "";
+    return ok(lines.slice(0, MAX_MATCHES).join("\n") + more, `search "${a.query}": ${lines.length} matches in ${files.size} files (${[...files].slice(0, 3).join(", ")})`);
+  },
+};
+
+function exec(cmd: string, args: string[], cwd: string, signal?: AbortSignal) {
+  return new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
+    const p = spawn(cmd, args, { cwd, signal });
+    let stdout = "";
+    let stderr = "";
+    p.stdout.on("data", (d) => (stdout += d));
+    p.stderr.on("data", (d) => (stderr += d));
+    p.on("error", reject);
+    p.on("close", (code) => resolve({ code: code ?? 2, stdout, stderr }));
+  });
+}
