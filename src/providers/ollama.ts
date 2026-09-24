@@ -24,6 +24,7 @@ export class OllamaProvider implements LLMProvider {
       stream: true,
       format: req.schema,
       tools: req.tools?.map((t) => ({ type: "function", function: t })),
+      think: this.profile.think,
       options: { ...this.options(req.temperature, req.maxTokens), ...(req.repeatPenalty ? { repeat_penalty: req.repeatPenalty } : {}) },
     };
     let content = "";
@@ -63,6 +64,7 @@ export class OllamaProvider implements LLMProvider {
 
   private options(temperature?: number, maxTokens?: number) {
     return {
+      ...this.profile.ollamaOptions,
       num_ctx: this.profile.ctx,
       temperature: temperature ?? this.profile.temperature,
       num_predict: maxTokens ?? this.profile.maxOutput,

@@ -76,6 +76,8 @@ export interface RunOptions {
   conversation?: string;
   /** Execute this plan as-is (e.g. "Run this plan" after Plan mode): no planner call, no review. */
   plan?: { goal?: string; todos: string[] };
+  /** The user detached the active editor from this message. */
+  excludeActiveFile?: boolean;
 }
 
 class Cancelled extends Error {}
@@ -126,7 +128,8 @@ export class Agent {
       emit({ type: "status", text: "Collecting context" });
       const budget = Budget.for(profile);
       const rules = await loadRules(host);
-      const editor = await host.editorContext?.();
+      const editorRaw = await host.editorContext?.();
+      const editor = editorRaw && opts.excludeActiveFile ? { ...editorRaw, activeFile: undefined } : editorRaw;
       const mentions = await expandMentions(host, task, Math.floor(budget.tokens("files") / 3), editor?.terminalOutput);
       const focus = [...mentions.files, editor?.activeFile?.path, ...(editor?.openTabs ?? [])].filter((p): p is string => !!p);
       const repoMap = await buildRepoMap(host, budget.tokens("map"), focus, task);
@@ -135,7 +138,7 @@ export class Agent {
           (mode === "agent" || t.kind === "read" || t.kind === "control") &&
           (t.name !== "done" || mode !== "ask"),
       );
-      const system = systemPrompt({ mode, toolMode: profile.toolMode, environment: await environmentInfo(), toolList: this.registry.describe(modeTools), rules: budget.fit("rules", rules.text), verifyCommands: rules.verifyCommands, repoMap });
+      const system = systemPrompt({ mode, model: provider.model, toolMode: profile.toolMode, environment: await environmentInfo(), toolList: this.registry.describe(modeTools), rules: budget.fit("rules", rules.text), verifyCommands: rules.verifyCommands, repoMap });
       const collected = await collectContext(host, editor, Math.floor(budget.tokens("files") / 3));
       const context = [mentions.context, collected].filter(Boolean).join("\n\n");
       const prefix: ChatMessage[] = [

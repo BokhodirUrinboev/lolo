@@ -1,7 +1,10 @@
 **
 !package.json
 !README.md
+!CHANGELOG.md
+!LICENSE
 !media/**
 !dist/extension.js
 !dist/webview/**
 !dist/wasm/**
+dist/webview/preview-*.html

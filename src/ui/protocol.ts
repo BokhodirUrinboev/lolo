@@ -3,11 +3,11 @@
 export type Mode = "ask" | "agent" | "plan";
 
 export type Item =
-  | { kind: "user"; text: string; mode: Mode }
+  | { kind: "user"; text: string; mode: Mode; /** Files attached as context (e.g. the active editor). */ context?: string[] }
   | { kind: "status"; text: string }
   | { kind: "plan"; goal?: string; todos: string[]; states: ("pending" | "active" | "done" | "failed")[] }
   | { kind: "thought"; text: string }
-  | { kind: "tool"; tool: string; title: string; ok: boolean; output: string }
+  | { kind: "tool"; tool: string; /** Path, command or query the call acted on. */ target?: string; title: string; ok: boolean; output: string }
   | { kind: "invalid"; text: string }
   | { kind: "verify"; ok: boolean; output: string }
   | { kind: "question"; text: string; answer?: string | null }
@@ -31,15 +31,38 @@ export interface Turn {
   running: boolean;
 }
 
+export interface SessionInfo {
+  id: string;
+  title: string;
+  updatedAt: number;
+}
+
+/** Why the chat can't work yet, shown as a banner with a fix. */
+export interface SetupProblem {
+  problem: "no-server" | "no-model";
+  model: string;
+  endpoint: string;
+  /** Models the server has (for "use this one instead"). */
+  installed: string[];
+}
+
 export interface ViewState {
+  setup?: SetupProblem;
+  sessionId: string;
+  /** Current conversation title (first message), "" for a new chat. */
+  title: string;
+  /** Past conversations, newest first (history menu). */
+  sessions: SessionInfo[];
   turns: Turn[];
+  /** Workspace-relative path of the active editor, offered as context. */
+  activeFile?: string;
   models: string[];
   model: string;
   mode: Mode;
   running: boolean;
   /** Session setting: apply edits without asking. */
   autoAccept: boolean;
-  /** Prompt tokens of the last model call vs the context window. */
+  /** Tokens of the conversation's last model call vs the model's context window (always set). */
   context?: { used: number; total: number };
 }
 
@@ -47,11 +70,17 @@ export type ToWebview =
   | { type: "state"; state: ViewState }
   | { type: "streaming"; thought: string; answer?: string }
   | { type: "planReview"; todos: string[]; goal?: string }
-  | { type: "mentionResults"; items: { label: string; detail?: string }[] };
+  | { type: "mentionResults"; items: { label: string; detail?: string }[] }
+  | { type: "insertText"; text: string };
 
 export type FromWebview =
   | { type: "ready" }
-  | { type: "send"; text: string; mode: Mode }
+  | { type: "send"; text: string; mode: Mode; includeActiveFile?: boolean }
+  | { type: "openSession"; id: string }
+  | { type: "deleteSession"; id: string }
+  | { type: "pickFile" }
+  | { type: "setup"; action: "retry" | "pull" | "settings" }
+  | { type: "command"; id: "restoreCheckpoint" | "openSettings" | "inlineEdit" }
   | { type: "cancel" }
   | { type: "newChat" }
   | { type: "setModel"; model: string }

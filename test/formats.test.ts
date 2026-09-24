@@ -81,3 +81,16 @@ describe("blank-line runs", async () => {
     expect(maxBlankRun("a\n\n\nb")).toBe(2);
   });
 });
+
+describe("resolveProfile", () => {
+  it("matches built-ins with or without a registry namespace", () => {
+    expect(resolveProfile("qwen3.5:9b").think).toBe(false);
+    expect(resolveProfile("huihui_ai/qwen3.5-abliterated:9b").think).toBe(false);
+    expect(resolveProfile("qwen3.5:9b").fim).toBeUndefined();
+    expect(resolveProfile("qwen2.5-coder:7b").fim).toBeDefined();
+    expect(resolveProfile("some/unknown:1b").ctx).toBe(8192);
+  });
+  it("lets user overrides win", () => {
+    expect(resolveProfile("qwen3.5:9b", [{ match: "qwen3.5", ctx: 131072 }]).ctx).toBe(131072);
+  });
+});

@@ -6,14 +6,16 @@ import { DiffReviewManager } from "./edit/diffView";
 import { VsCodeHost } from "./host/vscodeHost";
 import { inlineEdit } from "./inline/inlineEdit";
 import { createProvider, ProviderConfig } from "./providers";
-import type { ProfileOverride } from "./providers/modelProfiles";
+import { resolveProfile, type ProfileOverride } from "./providers/modelProfiles";
 import { ChatBackend, ChatViewProvider } from "./ui/chatView";
 import type { Mode } from "./ui/protocol";
 
 const cfg = () => vscode.workspace.getConfiguration("localAgent");
 const PROPOSED_SCHEME = "local-agent-proposed";
+/** Works on any Ollama install and has FIM tokens, so chat and autocomplete work with one download. */
+const DEFAULT_MODEL = "qwen2.5-coder:7b";
 
-function providerConfig(model = cfg().get("model", "qwen2.5-coder-32k:latest")): ProviderConfig {
+function providerConfig(model = cfg().get("model", DEFAULT_MODEL)): ProviderConfig {
   const c = cfg();
   return {
     provider: c.get<"ollama" | "openai">("provider", "ollama"),
@@ -32,7 +34,7 @@ export interface LocalAgentApi {
 }
 
 export function activate(context: vscode.ExtensionContext): LocalAgentApi {
-  const output = vscode.window.createOutputChannel("Local Agent");
+  const output = vscode.window.createOutputChannel("Agent Lolo");
   const review = new DiffReviewManager();
   // Read-only documents for "Open diff" on approval cards.
   const proposed = new Map<string, string>();
@@ -73,7 +75,15 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
       return r;
     },
     listModels: () => listModels(providerConfig()),
-    currentModel: () => cfg().get("model", "qwen2.5-coder-32k:latest"),
+    currentModel: () => cfg().get("model", DEFAULT_MODEL),
+    endpoint: () => ({ url: cfg().get("endpoint", "http://localhost:11434"), canPull: cfg().get("provider", "ollama") === "ollama" }),
+    pullModel(model) {
+      const term = vscode.window.createTerminal({ name: "Ollama pull" });
+      term.show();
+      term.sendText(`ollama pull ${model}`);
+      vscode.window.showInformationMessage(`Downloading ${model}. When it finishes, click Retry in the Agent Lolo chat.`);
+    },
+    contextWindow: () => resolveProfile(cfg().get("model", DEFAULT_MODEL), cfg().get<ProfileOverride[]>("profiles", [])).ctx,
     setModel: (model) => Promise.resolve(cfg().update("model", model, vscode.ConfigurationTarget.Global)),
     async restore(checkpoint) {
       const folder = activeFolder();
@@ -96,10 +106,23 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
     },
   };
   const chat = new ChatViewProvider(context, backend);
+  context.subscriptions.push(chat);
+
+  // Autocomplete needs FIM tokens. If the chat model has none (e.g. qwen3.5, a general
+  // model), fall back to an installed model that does (e.g. qwen2.5-coder).
+  let fimFallback: string | undefined;
+  const refreshFimFallback = () =>
+    listModels(providerConfig())
+      .then((models) => (fimFallback = models.find((m) => resolveProfile(m, cfg().get<ProfileOverride[]>("profiles", [])).fim)))
+      .catch(() => undefined);
+  void refreshFimFallback();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => e.affectsConfiguration("localAgent") && void refreshFimFallback()));
 
   const fimSettings = (): FimSettings => {
     const c = cfg();
-    const model = c.get("autocomplete.model", "") || c.get("model", "qwen2.5-coder-32k:latest");
+    const main = c.get("model", DEFAULT_MODEL);
+    const mainHasFim = !!resolveProfile(main, c.get<ProfileOverride[]>("profiles", [])).fim;
+    const model = c.get("autocomplete.model", "") || (mainHasFim ? main : (fimFallback ?? main));
     return {
       enabled: c.get("autocomplete.enabled", true),
       debounceMs: c.get("autocomplete.debounceMs", 250),
@@ -109,7 +132,7 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
   };
 
   const ask = async (mode: Mode) => {
-    const text = await vscode.window.showInputBox({ title: `Local Agent: ${mode === "agent" ? "Run Task" : mode === "ask" ? "Ask" : "Plan"}`, ignoreFocusOut: true });
+    const text = await vscode.window.showInputBox({ title: `Agent Lolo: ${mode === "agent" ? "Run Task" : mode === "ask" ? "Ask" : "Plan"}`, ignoreFocusOut: true });
     if (text?.trim()) await chat.submit(text.trim(), mode);
   };
 
@@ -129,7 +152,7 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
     vscode.commands.registerCommand("localAgent.toggleAutocomplete", async () => {
       const on = !cfg().get("autocomplete.enabled", true);
       await cfg().update("autocomplete.enabled", on, vscode.ConfigurationTarget.Global);
-      vscode.window.showInformationMessage(`Local Agent autocomplete ${on ? "enabled" : "disabled"}.`);
+      vscode.window.showInformationMessage(`Agent Lolo autocomplete ${on ? "enabled" : "disabled"}.`);
     }),
   );
   return { review, chat, chatReady: chat.ready };
@@ -152,7 +175,7 @@ async function listModels(p: ProviderConfig): Promise<string[]> {
 async function applyCode(review: DiffReviewManager, code: string) {
   const editor = vscode.window.visibleTextEditors.find((e) => e === vscode.window.activeTextEditor) ?? vscode.window.visibleTextEditors[0];
   if (!editor) {
-    vscode.window.showWarningMessage("Local Agent: open a file and select the code to replace first.");
+    vscode.window.showWarningMessage("Agent Lolo: open a file and select the code to replace first.");
     return;
   }
   const doc = editor.document;

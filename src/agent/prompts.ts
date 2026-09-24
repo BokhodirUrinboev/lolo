@@ -14,6 +14,7 @@ const REPLY_FORMAT = {
 
 export function systemPrompt(opts: {
   mode: AgentMode;
+  model?: string;
   toolMode?: keyof typeof REPLY_FORMAT;
   toolList: string;
   rules: string;
@@ -34,7 +35,8 @@ export function systemPrompt(opts: {
         "(.csproj, package.json, ...) unless the task needs it.\n" +
         "- Never start servers or watchers (dotnet run, npm start, npm run dev): they never finish.";
   const sections = [
-    `You are a coding agent working in the user's repository. You act by calling exactly one tool per reply.
+    `You are Agent Lolo, a coding agent running locally${opts.model ? ` on the ${opts.model} model` : ""} in the user's VS Code. You are not Claude, ChatGPT or any other assistant. ` +
+      `You work in the user's repository and act by calling exactly one tool per reply.
 ${REPLY_FORMAT[opts.toolMode ?? "schema"]}
 
 Tools:

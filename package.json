@@ -1,16 +1,18 @@
 {
-  "name": "local-agent",
-  "displayName": "Local Agent",
-  "description": "Local-first AI coding agent for small local models (Ollama, OpenAI-compatible).",
-  "version": "0.1.0",
-  "publisher": "local-agent",
-  "license": "UNLICENSED",
+  "name": "agent-lolo",
+  "displayName": "Agent Lolo",
+  "description": "Local-first AI coding agent for small local models (Ollama, llama.cpp, LM Studio): chat, plan & edit with diff approvals, checkpoints, inline edit, autocomplete. Nothing leaves your machine.",
+  "version": "0.3.0",
+  "publisher": "nodirbek",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.93.0"
   },
   "categories": [
     "AI",
-    "Programming Languages"
+    "Chat",
+    "Programming Languages",
+    "Machine Learning"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -21,51 +23,51 @@
       {
         "command": "localAgent.runTask",
         "title": "Run Task",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.ask",
         "title": "Ask",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.plan",
         "title": "Plan Only",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.cancel",
         "title": "Cancel Run",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.inlineEdit",
         "title": "Edit Selection",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.restoreCheckpoint",
         "title": "Restore Checkpoint",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.toggleAutocomplete",
         "title": "Toggle Autocomplete",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.diff.acceptAll",
         "title": "Accept All Changes",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       },
       {
         "command": "localAgent.diff.rejectAll",
         "title": "Reject All Changes",
-        "category": "Local Agent"
+        "category": "Agent Lolo"
       }
     ],
     "configuration": {
-      "title": "Local Agent",
+      "title": "Agent Lolo",
       "properties": {
         "localAgent.provider": {
           "type": "string",
@@ -88,7 +90,8 @@
         },
         "localAgent.model": {
           "type": "string",
-          "default": "qwen2.5-coder-32k:latest"
+          "default": "qwen2.5-coder:7b",
+          "description": "Model for chat and agent runs (also selectable in the chat). qwen3.5:9b is more accurate if you have ~8 GB of VRAM."
         },
         "localAgent.profiles": {
           "type": "array",
@@ -154,7 +157,7 @@
       "activitybar": [
         {
           "id": "localAgent",
-          "title": "Local Agent",
+          "title": "Agent Lolo",
           "icon": "media/icon.svg"
         }
       ]
@@ -216,6 +219,7 @@
     "@types/react-dom": "^19.3.0",
     "@types/vscode": "1.93.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "@vscode/codicons": "^0.0.46-24",
     "@vscode/test-electron": "^3.1.0",
     "dompurify": "^3.4.15",
     "esbuild": "^0.28.2",
@@ -233,5 +237,29 @@
   "allowScripts": {
     "esbuild@0.28.2": true
   },
-  "private": true
+  "preview": true,
+  "icon": "media/icon.png",
+  "keywords": [
+    "ai",
+    "agent",
+    "ollama",
+    "local",
+    "llm",
+    "qwen",
+    "copilot",
+    "autocomplete",
+    "offline",
+    "coding assistant"
+  ],
+  "galleryBanner": {
+    "color": "#141326",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nodirbek-Abdulaxadov/lolo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Nodirbek-Abdulaxadov/lolo/issues"
+  }
 }

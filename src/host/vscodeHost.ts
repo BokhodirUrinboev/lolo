@@ -131,7 +131,9 @@ export class VsCodeHost implements Host {
     if (!shell) return this.runHidden(command, signal, dir, timeoutMs);
     term.show(true);
     // The terminal keeps its directory between commands, so always cd explicitly.
-    const execution = shell.executeCommand(`cd ${JSON.stringify(dir)} && ${command}`);
+    // Windows' default shell is PowerShell 5.1, which has no `&&`.
+    const cd = process.platform === "win32" ? `Set-Location -LiteralPath '${dir.replace(/'/g, "''")}'; ` : `cd ${JSON.stringify(dir)} && `;
+    const execution = shell.executeCommand(`${cd}${command}`);
     let timedOut = false;
     let output = "";
     const exit = new Promise<number>((resolve) => {
@@ -170,7 +172,7 @@ export class VsCodeHost implements Host {
 
   private async agentTerminal(): Promise<vscode.Terminal> {
     if (this.terminal && this.terminal.exitStatus === undefined) return this.terminal;
-    this.terminal = vscode.window.createTerminal({ name: "Local Agent", cwd: this.folder.uri, isTransient: true });
+    this.terminal = vscode.window.createTerminal({ name: "Agent Lolo", cwd: this.folder.uri, isTransient: true });
     // A terminal that was never shown may not start its shell.
     this.terminal.show(true);
     // Shell integration activates asynchronously after the shell starts.
@@ -223,7 +225,7 @@ export class VsCodeHost implements Host {
 
   askUser(question: string) {
     if (this.askHandler) return this.askHandler(question);
-    return Promise.resolve(vscode.window.showInputBox({ title: "Local Agent asks", prompt: question, ignoreFocusOut: true }));
+    return Promise.resolve(vscode.window.showInputBox({ title: "Agent Lolo asks", prompt: question, ignoreFocusOut: true }));
   }
 
   async editorContext(): Promise<EditorContext | undefined> {

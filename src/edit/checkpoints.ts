@@ -74,7 +74,7 @@ export class Checkpoints {
 
   private git(...args: string[]): Promise<string> {
     const env = { ...process.env, GIT_DIR: this.gitDir, GIT_WORK_TREE: this.root };
-    const fullArgs = ["-c", "user.name=Local Agent", "-c", "user.email=agent@localhost", "-c", "commit.gpgsign=false", ...args];
+    const fullArgs = ["-c", "user.name=Agent Lolo", "-c", "user.email=agent@localhost", "-c", "commit.gpgsign=false", ...args];
     return new Promise((resolve, reject) => {
       execFile("git", fullArgs, { cwd: this.root, env, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) =>
         err ? reject(new Error(`git ${args[0]}: ${stderr || err.message}`)) : resolve(stdout),

@@ -22,7 +22,7 @@ export async function run(): Promise<void> {
   const folder = vscode.workspace.workspaceFolders![0];
   const output = vscode.window.createOutputChannel("smoke");
   // Use the extension's own review manager (it owns the review commands).
-  const ext = vscode.extensions.getExtension<LocalAgentApi>("local-agent.local-agent")!;
+  const ext = vscode.extensions.getExtension<LocalAgentApi>("nodirbek.agent-lolo")!;
   const { review, chat, chatReady } = await ext.activate();
   let autoApprove = true;
   const host = new VsCodeHost(folder, { autoApproveEdits: () => autoApprove, review, output });

@@ -22,6 +22,13 @@ export interface ModelProfile {
   fim?: FimTokens;
   temperature: number;
   maxOutput: number;
+  /**
+   * Reasoning ("thinking") for hybrid models such as Qwen3.5: false turns it off.
+   * One short JSON action per step doesn't need it, and it multiplies step time.
+   */
+  think?: boolean;
+  /** Extra sampling options passed to Ollama, overriding the model's Modelfile defaults. */
+  ollamaOptions?: Record<string, number>;
 }
 
 /** A profile override from settings; `match` is a model-id prefix. */
@@ -38,6 +45,20 @@ const QWEN_FIM: FimTokens = {
 const BUILTIN: ProfileOverride[] = [
   { match: "qwen2.5-coder", ctx: 32768, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 150, fim: QWEN_FIM, temperature: 0.2, maxOutput: 4096 },
   { match: "qwen3-coder", ctx: 65536, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 300, fim: QWEN_FIM, temperature: 0.3, maxOutput: 8192 },
+  // General (not coder) model: no FIM tokens, so autocomplete falls back to an installed coder model.
+  // Hybrid attention (only 1 in 4 layers keeps a KV cache): 64k costs ~1.3 GB more than 32k.
+  // Its Modelfile sets presence_penalty 1.5, which distorts code that repeats identifiers.
+  {
+    match: "qwen3.5",
+    ctx: 65536,
+    toolMode: "schema",
+    editFormat: "auto",
+    wholeFileMaxLines: 200,
+    temperature: 0.2,
+    maxOutput: 4096,
+    think: false,
+    ollamaOptions: { presence_penalty: 0 },
+  },
 ];
 
 const FALLBACK: Omit<ModelProfile, "id"> = {
@@ -50,12 +71,14 @@ const FALLBACK: Omit<ModelProfile, "id"> = {
 };
 
 /**
- * Resolves the profile for a model id. User overrides win over built-ins;
- * among matches the longest prefix wins.
+ * Resolves the profile for a model id. User overrides win over built-ins; among
+ * matches the longest prefix wins. Built-ins also match without a registry
+ * namespace ("huihui_ai/qwen3.5-abliterated:9b" → "qwen3.5").
  */
 export function resolveProfile(modelId: string, overrides: ProfileOverride[] = []): ModelProfile {
+  const bare = modelId.slice(modelId.lastIndexOf("/") + 1);
   const byLength = (list: ProfileOverride[]) =>
-    list.filter((p) => modelId.startsWith(p.match)).sort((a, b) => b.match.length - a.match.length)[0];
+    list.filter((p) => modelId.startsWith(p.match) || bare.startsWith(p.match)).sort((a, b) => b.match.length - a.match.length)[0];
   const builtin = byLength(BUILTIN);
   const user = byLength(overrides);
   const { match: _b, ...b } = builtin ?? { match: "" };

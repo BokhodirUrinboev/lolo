@@ -62,7 +62,14 @@ export function applyEvent(turn: Turn, e: AgentEvent) {
       items.push({ kind: "thought", text: e.text });
       return;
     case "tool":
-      items.push({ kind: "tool", tool: e.tool, title: e.result.summary, ok: e.result.ok, output: e.result.output.slice(0, MAX_TOOL_OUTPUT) });
+      items.push({
+        kind: "tool",
+        tool: e.tool,
+        target: toolTarget(e.args),
+        title: e.result.summary,
+        ok: e.result.ok,
+        output: e.result.output.slice(0, MAX_TOOL_OUTPUT),
+      });
       return;
     case "invalid":
       items.push({ kind: "invalid", text: e.error });
@@ -113,4 +120,17 @@ export function pendingPlanFor(turns: Turn[], text: string): { goal?: string; to
   const words = text.trim().replace(/[.!?,;:]+$/g, "").split(/\s+/);
   if (words.length > 6 || !GO_AHEAD.test(text.trim())) return undefined;
   return { goal: plan.goal, todos: plan.todos };
+}
+
+function toolTarget(args: Record<string, unknown>): string | undefined {
+  for (const k of ["path", "command", "query"]) if (typeof args[k] === "string") return args[k] as string;
+  return undefined;
+}
+
+/** Conversation title: the first user message, shortened. */
+export function titleOf(turns: Turn[]): string {
+  const first = turns[0]?.items.find((i) => i.kind === "user");
+  if (first?.kind !== "user") return "";
+  const t = first.text.replace(/\s+/g, " ").trim();
+  return t.length > 48 ? t.slice(0, 47) + "…" : t;
 }
