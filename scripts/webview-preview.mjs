@@ -51,13 +51,17 @@ const scenarios = {
     mode: "agent", running: false, autoAccept: false, context: { used: 0, total: 32768 }, turns: [],
     setup: { problem: "no-model", model: "qwen2.5-coder:7b", endpoint: "http://localhost:11434", installed: ["qwen3.5:9b"] },
   },
+  welcome: {
+    sessionId: "4", title: "", sessions: [], activeFile: "src/cart.js", models: ["qwen3.5:9b"], model: "qwen3.5:9b",
+    mode: "agent", running: false, autoAccept: false, context: { used: 0, total: 65536 }, turns: [],
+  },
   command: {
     sessionId: "3", title: "create simple todo api in .net", sessions: [], models: ["qwen3.5:9b"], model: "qwen3.5:9b",
     mode: "agent", running: true, autoAccept: true, context: { used: 2100, total: 65536 },
     turns: [
       {
         id: String(t0),
-        running: true,
+        running: false,
         items: [
           { kind: "user", text: "create simple todo api in .net asp.net core", mode: "plan" },
           { kind: "plan", goal: "Create a simple todo API in ASP.NET Core", todos: ["Create a new ASP.NET Core Web API project using dotnet new webapi -n TodoApi"], states: ["pending"] },
@@ -76,8 +80,29 @@ const scenarios = {
   },
 };
 
-// Colors approximating a dark purple theme with a yellow accent.
-const theme = {
+// THEME=dark-modern: VS Code's default dark theme (used for README screenshots).
+const darkModern = {
+  "--vscode-foreground": "#cccccc",
+  "--vscode-descriptionForeground": "#9d9d9d",
+  "--vscode-sideBar-background": "#181818",
+  "--vscode-editor-background": "#1f1f1f",
+  "--vscode-input-background": "#313131",
+  "--vscode-input-foreground": "#cccccc",
+  "--vscode-focusBorder": "#0078d4",
+  "--vscode-button-background": "#0078d4",
+  "--vscode-button-foreground": "#ffffff",
+  "--vscode-button-hoverBackground": "#026ec1",
+  "--vscode-button-secondaryBackground": "#313131",
+  "--vscode-button-secondaryForeground": "#cccccc",
+  "--vscode-textLink-foreground": "#4daafc",
+  "--vscode-charts-orange": "#d18616",
+  "--vscode-font-family": "system-ui, sans-serif",
+  "--vscode-font-size": "13px",
+  "--vscode-editor-font-family": "'DejaVu Sans Mono', monospace",
+  "--vscode-editor-font-size": "12px",
+};
+// Default: a dark purple theme with a yellow accent.
+const purple = {
   "--vscode-foreground": "#cfc8f0",
   "--vscode-descriptionForeground": "#8f89b3",
   "--vscode-sideBar-background": "#141326",
@@ -96,6 +121,8 @@ const theme = {
   "--vscode-editor-font-family": "'DejaVu Sans Mono', monospace",
   "--vscode-editor-font-size": "12px",
 };
+
+const theme = process.env.THEME === "dark-modern" ? darkModern : purple;
 
 for (const [name, state] of Object.entries(scenarios)) {
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="index.css">

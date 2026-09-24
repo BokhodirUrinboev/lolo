@@ -164,6 +164,7 @@ pre.diff .hunk { color: var(--muted); }
 .toolbar .chip { padding: 0 8px; border-radius: 6px; font-size: 0.9em; }
 .toolbar > * { flex: none; }
 .toolbar > .spacer { flex: 1 1 auto; min-width: 4px; }
+.toolbar { overflow: hidden; }
 .toolbar .chip { min-width: 0; flex-shrink: 1; overflow: hidden; }
 .toolbar .select-chip { flex-shrink: 0; }
 .toolbar .file-chip { flex-shrink: 3; }
@@ -198,7 +199,7 @@ pre.diff .hunk { color: var(--muted); }
 .mode-menu > div { white-space: normal; }
 
 /* Narrow panels: keep the toolbar on one line. */
-@container (max-width: 420px) {
+@container (max-width: 500px) {
   .mode-chip .label { display: none; }
   .select-chip select { max-width: 90px; }
 }

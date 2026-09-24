@@ -2,7 +2,7 @@
   "name": "agent-lolo",
   "displayName": "Agent Lolo",
   "description": "Local-first AI coding agent for small local models (Ollama, llama.cpp, LM Studio): chat, plan & edit with diff approvals, checkpoints, inline edit, autocomplete. Nothing leaves your machine.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "nodirbek",
   "license": "MIT",
   "engines": {

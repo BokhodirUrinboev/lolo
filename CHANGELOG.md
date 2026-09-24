@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- README: screenshots, quick start, mode and model guides.
+- Chat: the composer toolbar no longer overflows in narrow panels.
+
 ## 0.3.0 (preview)
 
 First public preview.

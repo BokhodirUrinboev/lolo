@@ -3,7 +3,8 @@
 !README.md
 !CHANGELOG.md
 !LICENSE
-!media/**
+!media/icon.png
+!media/icon.svg
 !dist/extension.js
 !dist/webview/**
 !dist/wasm/**
