@@ -87,7 +87,7 @@ Review $ARGUMENTS for bugs and list them. Do not change code.
 | Model | Memory (default context) | Notes |
 |---|---|---|
 | `qwen2.5-coder:7b` (default) | 6.4 GB at 32k | Fastest; also powers autocomplete. Its context tops out at 32k |
-| `qwen3.5:9b` | 7.9 GB at 64k | More accurate (95% of our 38 evaluation tasks, against 80% for `qwen2.5-coder:7b`), long context is cheap, sees images; about 50% slower |
+| `qwen3.5:9b` | 7.9 GB at 64k | More accurate (93% of our 38 evaluation tasks, against 79% for `qwen2.5-coder:7b`), long context is cheap, sees images; a bit slower |
 
 Pick the model in the chat. With `qwen3.5` as the chat model, autocomplete automatically uses an installed coder model. Other families have built-in settings too (`qwen2.5`, `qwen3`, `llama3`, `gemma3`, `mistral`, `deepseek-coder-v2`; `starcoder2` and `codellama` for autocomplete), and any other Ollama or OpenAI-compatible model works (see below for its context size).
 
@@ -225,6 +225,8 @@ node dist/eval.js validate            # every task fails as given, and its refer
 node dist/eval.js run --runs 2        # qwen2.5-coder-32k by default; --model to pick another
 node dist/eval.js fim --model qwen2.5-coder:1.5b   # autocomplete latency
 ```
+
+`scripts/finetune` trains qwen2.5-coder:7b on the agent's own successful runs (QLoRA, about an hour on a 12 GB GPU) and imports it into Ollama as `lolo-coder`, which has built-in settings. On evaluation tasks kept out of its training data it passed 77% against 73% for the base model, in fewer steps.
 
 ## License
 
