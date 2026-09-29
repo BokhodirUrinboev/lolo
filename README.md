@@ -6,7 +6,7 @@
 
 Most coding agents are designed for large cloud models and fall apart on a 7B model. Agent Lolo moves the hard parts into code: it gathers the context itself, constrains every tool call with a JSON schema, applies edits defensively, rejects edits that break the syntax, and runs your build or tests before calling a task done. The model only makes one small, checkable decision per step.
 
-> **Preview.** Tested on Linux with `qwen2.5-coder:7b` and `qwen3.5:9b`. macOS should work; Windows is experimental. Feedback and issues are welcome.
+> **Preview.** Tested on Linux and Windows 11 with `qwen2.5-coder:7b` and `qwen3.5:9b`; CI runs the tests and a VS Code smoke test on Linux, Windows and macOS. Feedback and issues are welcome.
 
 ## Quick start
 
@@ -50,7 +50,7 @@ Keys: `1` `2` `3`, arrows and Enter, `Esc`.
 
 **Web search, when you want it.** Off by default. Pick a provider in `localAgent.web.search` (your own SearXNG, Brave, Tavily or DuckDuckGo), then write `@web`, paste a URL, or ask for "the latest version". Every query and download is shown for approval, local network addresses are never fetched, and long pages are reduced to the parts that matter before they reach the model. `@docs:express` adds the README of the version you have installed.
 
-**MCP servers.** Servers from `.agent/mcp.json`, `.vscode/mcp.json` or `localAgent.mcpServers` (stdio or HTTP) are started for you. Their tools are offered only when a task is about them (or you write `@mcp:<server>`), because every extra tool confuses a small model; calls ask for approval unless the server marks the tool read-only. Resources become `@mcp:server/name` mentions and prompts become `/server:prompt` commands. `/mcp` shows their status.
+**MCP servers.** Servers from `.agent/mcp.json`, `.vscode/mcp.json` or `localAgent.mcpServers` (stdio or HTTP) are started for you. Their tools are offered only when a task is about them (or you write `@mcp:<server>`), because every extra tool confuses a small model; calls ask for approval unless the server marks the tool read-only. Resources become `@mcp:server/name` mentions and prompts become `/server:prompt` commands. `/mcp` shows their status and lets you switch individual tools off.
 
 ```json
 { "mcpServers": { "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "${env:GITHUB_TOKEN}" } } } }
@@ -87,9 +87,9 @@ Review $ARGUMENTS for bugs and list them. Do not change code.
 | Model | Memory (default context) | Notes |
 |---|---|---|
 | `qwen2.5-coder:7b` (default) | 6.4 GB at 32k | Fastest; also powers autocomplete. Its context tops out at 32k |
-| `qwen3.5:9b` | 7.9 GB at 64k | More accurate (solved every task in our first evaluation set), long context is cheap, sees images; about 30% slower |
+| `qwen3.5:9b` | 7.9 GB at 64k | More accurate (95% of our 38 evaluation tasks, against 80% for `qwen2.5-coder:7b`), long context is cheap, sees images; about 50% slower |
 
-Pick the model in the chat. With `qwen3.5` as the chat model, autocomplete automatically uses an installed coder model. Any other Ollama or OpenAI-compatible model works too (see below for its context size).
+Pick the model in the chat. With `qwen3.5` as the chat model, autocomplete automatically uses an installed coder model. Other families have built-in settings too (`qwen2.5`, `qwen3`, `llama3`, `gemma3`, `mistral`, `deepseek-coder-v2`; `starcoder2` and `codellama` for autocomplete), and any other Ollama or OpenAI-compatible model works (see below for its context size).
 
 ## Context size and hardware
 
@@ -160,6 +160,10 @@ Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
 
 You also need `git` on your PATH (for checkpoints).
 
+## Windows
+
+Install [Git for Windows](https://git-scm.com/download/win) (checkpoints need git anyway). The agent runs its commands in Git Bash, so the `ls`, `grep`, `&&` and `test -f` that models write work as they would on Linux; the agent's terminal in VS Code is a Git Bash terminal too. When `python3` is only the Microsoft Store placeholder, the agent's commands get a `python3` that runs your installed Python. Without Git Bash, commands run in `cmd.exe` and the model is told so. Set the `LOLO_SHELL` environment variable to use another bash-compatible shell.
+
 ## Project rules
 
 Put conventions and checks in `.agent/rules.md`; it is always part of the prompt. `verify:` lines run automatically when the agent finishes a change, and failures are fed back for repair:
@@ -213,6 +217,14 @@ You can write in any language, but small coder models understand English best. F
 ## Contributing
 
 Source, issues and the evaluation harness are on [GitHub](https://github.com/Nodirbek-Abdulaxadov/lolo). `npm install && npm run build`, then press F5 in VS Code to run the extension.
+
+Changes to the agent are measured with the evaluation: 38 tasks in JavaScript, TypeScript, Python, C#, Go, with MCP servers, web pages, git and multi-message conversations, each with hidden tests and a reference solution.
+
+```
+node dist/eval.js validate            # every task fails as given, and its reference solution passes
+node dist/eval.js run --runs 2        # qwen2.5-coder-32k by default; --model to pick another
+node dist/eval.js fim --model qwen2.5-coder:1.5b   # autocomplete latency
+```
 
 ## License
 

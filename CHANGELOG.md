@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.5.0
+
+Stage 14 of the plan: Windows, a much larger evaluation, and the agent fixes it found.
+
+**Windows.** Tested on Windows 11 (unit tests, the VS Code smoke test and the evaluation); CI now runs the tests and the smoke test on Linux, Windows and macOS.
+
+- Commands run in Git Bash (installed with Git), so the `ls`, `grep`, `&&` and `test -f` that models write work; the agent's VS Code terminal is Git Bash too. Without Git Bash, cmd.exe, and the prompt says so.
+- `python3` works when Windows only has the Microsoft Store placeholder for it.
+- Background servers (`npm run dev`) are really stopped at the end of a task, and commands that time out are stopped with everything they started.
+- Search results and build errors show workspace-relative paths with `/`.
+
+**Fewer failed tasks with small models.** Each fix comes from a failing run of qwen2.5-coder:7b and is done by code:
+
+- Edits: an ambiguous `search` uses the match in the function the task names (and `all=true` stays inside it); a `replace` that repeats the lines around `search`, or is a complete new version of the function, replaces instead of duplicating; line breaks escaped twice are repaired; placeholders like `// existing implementation` are refused; an edit already in place is not applied again. A file must be read before it is edited, as in Claude Code.
+- Builds: missing C# `using` directives for framework types are added by code; failing builds and checks show the code at the error lines; `namespace X;` followed by braces is repaired.
+- Plans: todos about the same file are merged, code in the todo list is refused, "read/identify/locate" todos and test todos nobody asked for are dropped, and moving a file is one todo (a later "fix the imports" todo completes by code once move_file did it). In the middle of a refactor, checks that fail because of a later todo run again after it. "Remember that …" always saves the fact.
+- Tests: when the task is to make failing tests pass, the tests can't be edited.
+- `node server.js`, `python app.py` and `go run .` of a server start it in the background instead of waiting 2 minutes.
+- Replies that run away (a thought that never ends, one line repeated) are stopped while streaming instead of at the 4096-token limit.
+
+**MCP.** `/mcp` lists every server's tools as a checklist; unchecked tools are never offered.
+
+**Models.** Built-in settings for qwen2.5, qwen3, llama3, gemma3, mistral and deepseek-coder-v2 (32k context instead of 8k), and autocomplete tokens for deepseek-coder-v2, starcoder2 and codellama.
+
+**Evaluation: 14 → 38 tasks**, each with hidden tests and a reference solution (`eval.js validate` checks both): .NET, multi-file refactors, TypeScript, failing-test fixes, git, memory, a background server tried with curl, MCP (a mock issue tracker), web (recorded pages) and a plan-then-"ok, do it" conversation. `eval.js fim` measures autocomplete latency. The evaluation also runs nightly in CI.
+
+Measured on an RTX 4070 Ti (Windows 11), 38 tasks × 2 runs:
+
+| | qwen2.5-coder:7b (32k) | qwen3.5:9b | target |
+|---|---|---|---|
+| tool-call validity | 98.9% | 98.7% | ≥ 98% |
+| calls refused by policy (read before edit, protected tests) | 8.2% | 0.4% | |
+| edit apply | 87.4% | 98.2% | ≥ 95% |
+| task pass | 80.3% | 94.7% | ≥ 60% |
+| avg steps / time per task | 5.9 / 7.9 s | 6.3 / 11.8 s | |
+
+On the same 38 tasks before these fixes, qwen2.5-coder:7b passed 60.5% (edit apply 77.8%). qwen3.5:9b meets all three targets of the plan; with qwen2.5-coder:7b edit apply is still below 95% (most failed edits are a `search` the model got wrong), and it fails `go-chunk` (it decides the loop is already correct), `js-split-validators`, `js-extract-tax`, `js-fix-failing-tests`, `py-fix-failing-tests`, `git-fix-uncommitted` and `js-validate-email` (a too-weak email check) in both runs. Measured before the last change (stopping replies that repeat one line), which only makes such steps fail sooner.
+
+Autocomplete latency (`eval.js fim`, 40 completions, before the editor's 250 ms debounce): qwen2.5-coder:1.5b p50 60 ms / p90 121 ms on the GPU and p50 325 ms / p90 1.07 s on the CPU only; qwen2.5-coder:7b p50 156 ms / p90 780 ms on the GPU. The plan's goal was p50 under 500 ms on a GPU and about 1 s on a CPU with a 1.5B model.
+
+**Fine-tuning.** `scripts/finetune` writes merged safetensors that `ollama create -q q4_K_M` imports (no llama.cpp build), and `eval.js export --exclude` keeps evaluation tasks out of the dataset.
+
+**Releases.** Pushing a `v*` tag builds the .vsix and publishes it to the Marketplace and Open VSX once their tokens are set as repository secrets.
+
 ## 0.4.1
 
 - "Run everything" mode (`/yolo`, `localAgent.autoRunCommands`): edits and terminal commands without asking; dangerous commands stay blocked. The chosen mode now carries over to new conversations.

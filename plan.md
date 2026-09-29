@@ -156,6 +156,8 @@ Kichik model bilan ishlaganda bu modul majburiy: prompt yoki format o'zgarishi y
 - Autocomplete p50 latency GPU'da < 500ms. CPU'da 1.5B model bilan ~1s.
 - Boshqa modelga o'tish uchun faqat yangi profile qo'shish kifoya, kod o'zgarmaydi.
 
+> **Holat (0.5.0):** RTX 4070 Ti, Windows 11, 38 vazifa × 2 run. `qwen2.5-coder-32k`: tool-call validity 98.9%, edit apply 87.4%, task pass 80.3% (shu vazifalarda tuzatishlardan oldin 60.5% edi). `qwen3.5:9b`: 98.7%, 98.2%, 94.7%, ya'ni uchala maqsad ham bajarildi. Edit apply 95% dan past: muvaffaqiyatsiz edit'larning ko'pi modelning `search`'ni noto'g'ri yozishi. Policy rad etgan chaqiruvlar (o'qilmagan faylni tahrirlash, himoyalangan testlar) validity'ga kirmaydi, alohida sanaladi (qwen2.5-coder'da 8.2%). Autocomplete (`eval.js fim`, 40 ta completion, 250 ms debounce'siz): GPU'da qwen2.5-coder:1.5b p50 60 ms (p90 121 ms), 7b p50 156 ms (p90 780 ms); faqat CPU'da 1.5b p50 325 ms (p90 1.07 s). Diff preview va checkpoint'siz yozish yo'q; model o'qimagan faylni tahrirlay olmaydi. Yangi model oilalari (qwen2.5, qwen3, llama3, gemma3, mistral, deepseek-coder-v2, starcoder2, codellama) faqat profile bilan qo'shildi.
+
 ## Keyingi bosqich (0.4+)
 
 0.3 bilan asosiy reja bajarildi. Endi agent imkoniyatlarini kengaytiramiz. Asosiy qoida o'zgarmaydi: kichik model uchun **har bir yangi tool bu yangi xato ehtimoli**. Har tool `anyOf` schema'ga yangi branch qo'shadi, 7B model esa ro'yxat qancha uzun bo'lsa, tool'ni shuncha ko'p adashtiradi. Shuning uchun har imkoniyat:
@@ -182,6 +184,8 @@ Kichik model bilan ishlaganda bu modul majburiy: prompt yoki format o'zgarishi y
 
 > **Holat (0.4.0): bajarildi**, Lolo'ni MCP server qilish ham (`cli --mcp-server`). VS Code'ning `vscode.lm.tools` API'si 1.93 engine'da yo'q, shuning uchun uning o'rniga `.vscode/mcp.json` va `mcp.servers` sozlamasi o'qiladi.
 
+> **Holat (0.5.0):** chat'dagi "Tools" menyusi qo'shildi: `/mcp` har serverning tool'larini ro'yxat qilib ko'rsatadi, belgisi olib tashlangan tool agentga hech qachon taklif qilinmaydi (workspace uchun saqlanadi).
+
 - **MCP client:** `@modelcontextprotocol/sdk` bilan stdio va streamable HTTP transport'lari. Konfiguratsiya `.agent/mcp.json` va `localAgent.mcpServers` sozlamasida bo'ladi. VS Code'ning o'zida sozlangan MCP serverlar ham ko'rinadi (`vscode.lm.tools`, `VsCodeHost` orqali).
 - **Tool mapping:** MCP tool'ning `inputSchema`'si `anyOf` branch'iga aylanadi, nomi `mcp__<server>__<tool>` ko'rinishida bo'ladi. Schema Ollama `format` tushunadigan subset'ga keltiriladi: `$ref` ochiladi, qo'llab-quvvatlanmaydigan keyword'lar olib tashlanadi. Tavsif qisqartiriladi, chunki uzun tavsif prompt'ni shishiradi.
 - **Tanlash:** MCP serverlarda o'nlab tool bo'lishi mumkin. Foydalanuvchi har server uchun qaysi tool'lar yoqilishini belgilaydi (chat'dagi "Tools" menyusi). Qolganini dinamik to'plam (11-bo'lim) filtrlaydi: todo matniga eng mos top-k tool olinadi.
@@ -203,6 +207,8 @@ Kichik model bilan ishlaganda bu modul majburiy: prompt yoki format o'zgarishi y
 ### 14. Boshqa yo'nalishlar
 
 > **Holat (0.4.0):** explore, memory, custom buyruqlar, rasm kiritish va eval'ni 14 vazifaga (JS, Python, C#, Go) kengaytirish bajarildi. Fine-tune pipeline'i tayyor (`scripts/finetune`), lekin o'qitish hali ishga tushirilmagan: GPU'da soatlab vaqt va torch/unsloth o'rnatish kerak. Windows/macOS'da test qilish va Open VSX'ga chiqarish (`npm run publish:ovsx`, token kerak) qo'lda qilinadi.
+
+> **Holat (0.5.0):** Windows 11'da to'liq sinovdan o'tdi: unit testlar, haqiqiy VS Code ichidagi smoke test va eval. Buyruqlar Git Bash'da ishlaydi (model yozadigan `ls`, `grep`, `&&`, `test -f` Windows'da ham ishlaydi), `python3` faqat Microsoft Store yorlig'i bo'lsa shim qo'yiladi, fon serverlari (`npm run dev`) run oxirida albatta to'xtatiladi. CI testlar va smoke test'ni Linux, Windows va macOS'da ishga tushiradi (macOS shu yo'l bilan tekshiriladi). Eval 14 dan 38 vazifaga kengaytirildi: .NET, ko'p faylli refactor, TypeScript, MCP (mock tracker server), web (yozib olingan javoblar), git, xotira, fon server va ikki xabarli suhbat; har vazifada namunaviy yechim bor, `eval.js validate` ularni tekshiradi; CI'da nightly eval. Eval topgan xatolar orchestration'da tuzatildi (CHANGELOG, 0.5.0). Marketplace va Open VSX'ga nashr `release.yml` orqali: `v*` tag, VSCE_PAT/OVSX_PAT secret qo'shilganda. Fine-tune: skript Windows va Ollama importiga moslandi (merged safetensors → `ollama create -q q4_K_M`, llama.cpp kerak emas), `eval.js export --exclude` eval vazifalarini dataset'dan chiqarib qo'yadi.
 
 - **Explore sub-run:** read-only tool'lar bilan alohida qisqa run ishlaydi va asosiy run'ga faqat xulosa qaytaradi ("qaysi fayllar, qaysi funksiyalar"). Asosiy context toza qoladi. Kichik model uchun bu parallel agentlardan foydaliroq.
 - **Uzoq muddatli xotira:** `.agent/memory.md`. Agent loyiha haqidagi faktlarni taklif qiladi, foydalanuvchi tasdiqlagani saqlanadi va prompt'ga kiradi (rules'dan keyin, o'zgarmas qism sifatida, KV cache buzilmaydi).
