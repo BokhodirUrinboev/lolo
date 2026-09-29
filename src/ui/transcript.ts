@@ -123,7 +123,9 @@ export function pendingPlanFor(turns: Turn[], text: string): { goal?: string; to
 }
 
 function toolTarget(args: Record<string, unknown>): string | undefined {
-  for (const k of ["path", "command", "query"]) if (typeof args[k] === "string") return args[k] as string;
+  if (typeof args.symbol === "string") return args.new_name ? `${args.symbol} → ${args.new_name}` : (args.symbol as string);
+  if (typeof args.from === "string" && typeof args.to === "string") return `${args.from} → ${args.to}`;
+  for (const k of ["path", "command", "query", "url"]) if (typeof args[k] === "string") return args[k] as string;
   return undefined;
 }
 

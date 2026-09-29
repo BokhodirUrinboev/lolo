@@ -1,0 +1,1 @@
+{"task": "load_config(path) in config.py must return DEFAULTS overridden by the keys in the JSON file, and just the defaults when the file does not exist. Never modify the DEFAULTS dict.", "check": "python3 -m unittest -q"}

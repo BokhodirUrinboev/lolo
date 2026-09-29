@@ -172,6 +172,7 @@ export interface SymbolDef {
   /** First line of the definition, trimmed: the signature shown in the repo map. */
   signature: string;
   line: number; // 1-based
+  endLine: number; // 1-based, inclusive
   /** Number of enclosing definitions (for indentation). */
   depth: number;
 }
@@ -209,6 +210,7 @@ export async function fileSymbols(file: string, text: string): Promise<FileSymbo
       name,
       signature: signatureOf(node.text),
       line: node.startPosition.row + 1,
+      endLine: node.endPosition.row + 1,
       depth: defNodes.filter((o) => o.node.startIndex < node.startIndex && o.node.endIndex >= node.endIndex).length,
     }));
     const refs = new Map<string, number>();
@@ -220,6 +222,40 @@ export async function fileSymbols(file: string, text: string): Promise<FileSymbo
     const symbols = { defs, refs };
     cache.set(file, { hash, symbols });
     return symbols;
+  } finally {
+    tree.delete();
+  }
+}
+
+export interface Occurrence {
+  line: number; // 1-based
+  column: number; // 0-based, UTF-16
+  start: number; // string index
+  end: number;
+}
+
+/** Shorthand `{ name }` in object literals and destructuring: a reference too, for renames. */
+const SHORTHAND = ["shorthand_property_identifier", "shorthand_property_identifier_pattern"];
+
+/**
+ * Identifier tokens equal to `name` (not inside strings or comments), for renames and
+ * references without a language server. undefined when the language has no grammar.
+ */
+export async function identifierOccurrences(file: string, text: string, name: string): Promise<Occurrence[] | undefined> {
+  const lang = languageFor(file);
+  if (!lang) return undefined;
+  const l = await load(lang);
+  if (!l) return undefined;
+  if (!text.includes(name)) return [];
+  const tree = l.parser.parse(text);
+  if (!tree) return undefined;
+  try {
+    const out: Occurrence[] = [];
+    for (const n of tree.rootNode.descendantsOfType([...l.refs, ...SHORTHAND])) {
+      if (n && n.text === name) out.push({ line: n.startPosition.row + 1, column: n.startPosition.column, start: n.startIndex, end: n.endIndex });
+    }
+    // The WASM parser reads JS strings as UTF-16, so indexes are string indexes already.
+    return out.sort((a, b) => a.start - b.start);
   } finally {
     tree.delete();
   }

@@ -5,15 +5,26 @@ import { environmentInfo } from "../context/environment";
 import { expandMentions } from "../context/mentions";
 import { detectChecks } from "../context/projectChecks";
 import { loadRules, Rules } from "../context/rules";
+import { listFiles } from "../context/repoMap";
+import { SemanticIndex } from "../context/semanticIndex";
+import { languageFor } from "../context/treeSitter";
 import { Checkpoints } from "../edit/checkpoints";
 import { EditState } from "../edit/formats";
 import type { Host } from "../host/types";
 import { ChatMessage, ChatResponse, LLMProvider, ProviderError } from "../providers/types";
 import { formatDiagnostics } from "../tools/diagnostics";
-import { truncateOutput } from "../tools/output";
-import { Action, AgentMode, ALL_TOOLS, ToolRegistry } from "../tools/registry";
+import { MEMORY_PATH, memoryText } from "../tools/memoryTool";
+import { ProcessManager } from "../tools/processes";
+import { codeStillUses } from "../tools/symbolTools";
+import { EXTRACT_PROMPT } from "../tools/webTools";
+import type { WebConfig } from "../web/search";
+import { failureReport } from "../tools/testReport";
+import type { McpHub, McpToolDef } from "../mcp/hub";
+import { selectMcpTools } from "../mcp/select";
+import { Action, AgentMode, ToolRegistry } from "../tools/registry";
 import type { ToolContext, ToolDef, ToolResult } from "../tools/types";
 import { History, mergeConsecutive } from "./compaction";
+import { toolNeeds } from "./needs";
 import { makePlan } from "./planner";
 import { PLAN_REQUEST, QUESTION_NOTE, systemPrompt, taskMessage, todoPrompt } from "./prompts";
 import { TrajectoryLog } from "./trajectoryLog";
@@ -44,7 +55,18 @@ export interface AgentDeps {
   maxRepairs?: number;
   /** Write .agent/trajectories/<run>.jsonl (default true). */
   trajectory?: boolean;
+  /** Embedding model for semantic_search (e.g. nomic-embed-text); off when unset. */
+  embeddingModel?: string;
+  /** Web search provider; web tools are off when unset. */
+  web?: WebConfig;
+  /** Connected MCP servers; their tools are offered per todo (mcp/select.ts). */
+  mcp?: McpHub;
+  /** Set for explore sub-runs: no nested explore. */
+  nested?: boolean;
 }
+
+/** Repositories with at least this many code files get the explore tool for vague todos. */
+const LARGE_REPO_FILES = 60;
 
 export interface RunStats {
   steps: number;
@@ -78,6 +100,8 @@ export interface RunOptions {
   plan?: { goal?: string; todos: string[] };
   /** The user detached the active editor from this message. */
   excludeActiveFile?: boolean;
+  /** Pasted screenshots (base64), attached to the task message for vision models. */
+  images?: string[];
 }
 
 class Cancelled extends Error {}
@@ -91,13 +115,21 @@ export function partialJsonString(json: string, field: string): string | undefin
   ).replace(/\\$/, "");
 }
 
+/** "server: tool, tool" per MCP server, for the system prompt. */
+function mcpSummary(tools: McpToolDef[]): string {
+  const byServer = new Map<string, string[]>();
+  for (const t of tools) byServer.set(t.mcp.server, [...(byServer.get(t.mcp.server) ?? []), t.mcp.tool]);
+  return [...byServer].map(([server, names]) => `- ${server}: ${names.slice(0, 30).join(", ")}${names.length > 30 ? ", ..." : ""}`).join("\n");
+}
+
 /** Stop and ask the user after this many consecutive failed or invalid steps. */
 const MAX_CONSECUTIVE_FAILURES = 4;
 /** Extra attempts after a model generation failure. */
 const MODEL_RETRIES = 2;
 
 export class Agent {
-  private readonly registry = new ToolRegistry();
+  /** Replaced at the start of each run, when MCP tools are known. */
+  private registry = new ToolRegistry();
 
   constructor(private readonly deps: AgentDeps) {}
 
@@ -113,7 +145,9 @@ export class Agent {
     let todos: string[] = [];
     let checkpoint: string | undefined;
 
+    const processes = new ProcessManager(host.root);
     const finish = (status: RunResult["status"], summary: string): RunResult => {
+      void processes.stopAll();
       stats.ms = Date.now() - started;
       const result: RunResult = { status, summary, todos, changed: [...changed], checkpoint, stats, logFile: log?.file };
       log?.write("run_end", { status, summary, changed: result.changed, stats });
@@ -124,26 +158,42 @@ export class Agent {
     try {
       log?.write("run_start", { task, mode, model: provider.model, profile });
 
+      if (opts.images?.length && (await provider.supportsImages?.()) === false) {
+        return finish("failed", `${provider.model} can't read images. Pick a vision model (e.g. qwen3.5:9b) in the model menu, or describe the problem in text.`);
+      }
       // 2. Context: stable parts go into the system message, per-run parts into the task message.
       emit({ type: "status", text: "Collecting context" });
       const budget = Budget.for(profile);
       const rules = await loadRules(host);
+      const memory = (await host.stat(MEMORY_PATH)) === "file" ? memoryText(await host.readFile(MEMORY_PATH)) : "";
       const editorRaw = await host.editorContext?.();
       const editor = editorRaw && opts.excludeActiveFile ? { ...editorRaw, activeFile: undefined } : editorRaw;
-      const mentions = await expandMentions(host, task, Math.floor(budget.tokens("files") / 3), editor?.terminalOutput);
+      const mentions = await expandMentions(host, task, Math.floor(budget.tokens("files") / 3), { terminalOutput: editor?.terminalOutput, web: this.deps.web, mcp: this.deps.mcp });
       const focus = [...mentions.files, editor?.activeFile?.path, ...(editor?.openTabs ?? [])].filter((p): p is string => !!p);
       const repoMap = await buildRepoMap(host, budget.tokens("map"), focus, task);
-      const modeTools = ALL_TOOLS.filter(
+      const mcp = this.deps.mcp;
+      if (mcp?.size) {
+        emit({ type: "status", text: "Starting MCP servers" });
+        await mcp.ready();
+        for (const st of mcp.status().filter((x) => !x.ok)) emit({ type: "status", text: `MCP server "${st.name}" is not available: ${st.error}` });
+      }
+      const mcpTools = mcp?.tools() ?? [];
+      this.registry = new ToolRegistry(mcpTools);
+      const embedModel = this.deps.embeddingModel;
+      const semantic = embedModel && provider.embed ? new SemanticIndex(host, embedModel, (texts, sig) => provider.embed!(texts, embedModel, sig)) : undefined;
+      const modeTools = this.registry.all.filter(
         (t) =>
           (mode === "agent" || t.kind === "read" || t.kind === "control") &&
+          !t.group &&
+          (!t.available || t.available({ semantic } as ToolContext)) &&
           (t.name !== "done" || mode !== "ask"),
       );
-      const system = systemPrompt({ mode, model: provider.model, toolMode: profile.toolMode, environment: await environmentInfo(), toolList: this.registry.describe(modeTools), rules: budget.fit("rules", rules.text), verifyCommands: rules.verifyCommands, repoMap });
+      const system = systemPrompt({ mode, model: provider.model, toolMode: profile.toolMode, environment: await environmentInfo(), toolList: this.registry.describe(modeTools), mcp: mcpSummary(mcpTools), rules: budget.fit("rules", rules.text), memory: budget.fit("rules", memory), verifyCommands: rules.verifyCommands, repoMap });
       const collected = await collectContext(host, editor, Math.floor(budget.tokens("files") / 3));
       const context = [mentions.context, collected].filter(Boolean).join("\n\n");
       const prefix: ChatMessage[] = [
         { role: "system", content: system },
-        { role: "user", content: taskMessage(task, context, opts.conversation) },
+        { role: "user", content: taskMessage(task, context, opts.conversation), ...(opts.images?.length ? { images: opts.images } : {}) },
       ];
       const history = new History();
 
@@ -198,11 +248,16 @@ export class Agent {
       }
 
       // 4. Execute todos.
-      const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: this.deps.commandAllowlist, signal, readOnly: execMode === "ask" };
+      const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: this.deps.commandAllowlist, signal, readOnly: execMode === "ask", processes, semantic,
+        web: this.deps.web,
+        largeRepo: !this.deps.nested && (await listFiles(host)).filter((f) => languageFor(f)).length >= LARGE_REPO_FILES,
+        explore: this.deps.nested ? undefined : (question, sig) => this.explore(question, emit, sig),
+        extract: (text, question, sig) => this.extract(text, question, stats, sig),
+      };
       const summaries: string[] = [];
       for (let i = 0; i < todos.length; i++) {
         emit({ type: "todo", index: i, status: "active" });
-        const outcome = await this.runTodo(i, todos, execMode, { prefix, history, ctx, rules, budget, stats, changed, emit, log, signal });
+        const outcome = await this.runTodo(i, todos, execMode, { prefix, history, ctx, rules, budget, stats, changed, emit, log, signal, task });
         if (!outcome.ok) {
           emit({ type: "todo", index: i, status: "failed" });
           return finish("failed", [...summaries, `Stopped at todo ${i + 1} (${todos[i]}): ${outcome.summary}`].join("\n"));
@@ -235,12 +290,31 @@ export class Agent {
       emit: (e: AgentEvent) => void;
       log?: TrajectoryLog;
       signal?: AbortSignal;
+      /** The user's message (web access is decided from it, too). */
+      task: string;
     },
   ): Promise<{ ok: boolean; summary: string }> {
     const { history, ctx, stats, emit, log } = s;
     const { host } = this.deps;
     const maxSteps = this.deps.maxStepsPerTodo ?? 15;
     const maxRepairs = this.deps.maxRepairs ?? 3;
+    // A later todo of a rename rename_symbol already did everywhere (planners split renames per file).
+    const renamed = [...(ctx.renamed ?? [])].find(([from]) => new RegExp(`\\b${from.replace(/\$/g, "\\$")}\\b`).test(todos[index]));
+    if (renamed && /renam|replace|update/i.test(todos[index]) && !(await codeStillUses(ctx, renamed[0]))) {
+      history.note(`Todo ${index + 1} was already done by renaming ${renamed[0]} to ${renamed[1]} everywhere.`);
+      log?.write("todo_done", { index, summary: "already done by rename_symbol", auto: "rename" });
+      return { ok: true, summary: `Already done: ${renamed[0]} was renamed to ${renamed[1]} everywhere.` };
+    }
+    // Optional tool groups (git, file moves) are offered only to todos that mention them.
+    // Questions are read-only already: explore would only add a second run.
+    ctx.needs = toolNeeds(todos[index], s.task, { largeRepo: ctx.largeRepo && mode === "agent" });
+    ctx.todo = todos[index];
+    ctx.mcpTools = selectMcpTools(this.registry.all.filter((t): t is McpToolDef => t.group === "mcp"), todos[index], s.task);
+    const extra = this.registry.enabled(mode, ctx).filter((t) => t.group && t.group !== "symbols");
+    if (extra.length) history.note(`Extra tools for this todo:\n${this.registry.describe(extra)}`);
+    if (ctx.needs.has("web") && !ctx.web && /(^|\s)@web\b/.test(s.task)) {
+      history.note("Web access is off, so you cannot search the web. Answer from the code and what you know, and tell the user that web search can be enabled in the setting localAgent.web.search.");
+    }
     let repairs = 0;
     let failures = 0;
     let repeats = 0;
@@ -266,8 +340,18 @@ export class Agent {
      * so first check the result: if the checks pass the todo is complete. Otherwise
      * ask the user (interactive hosts) or give up.
      */
+    /** Question mode, stuck: the model has usually read enough but keeps looking. Only `answer` is offered from now on. */
+    let answerNow = false;
     const onStuck = async (problem: string, failSummary: string) => {
       if (await checksPass(false)) return completeAuto("stuck, but checks pass");
+      if (mode === "ask" && !answerNow) {
+        answerNow = true;
+        failures = 0;
+        repeats = 0;
+        log?.write("stuck", { forceAnswer: true });
+        history.note("Stop looking: you have what you need. Call answer now with the best answer from what you found above.");
+        return undefined;
+      }
       const go = await this.unstick(index, todos, history, problem);
       failures = 0;
       repeats = 0;
@@ -285,7 +369,7 @@ export class Agent {
       const compacted = history.compactIfNeeded(historyBudget);
       if (compacted) log?.write("compaction", { turns: compacted });
 
-      const enabled = this.registry.enabled(mode, ctx);
+      const enabled = this.registry.enabled(mode, ctx).filter((t) => !answerNow || t.name === "answer");
       // Built exactly like the planner call, so the planner's prefix is reused from the KV cache.
       const messages = mergeConsecutive([...s.prefix, ...history.messages()]);
       const t0 = Date.now();
@@ -403,9 +487,11 @@ export class Agent {
       let observation = result.output;
       if (result.changed?.length) {
         stats.editsApplied++;
-        changedInTodo = true;
+        // Agent files (.agent/memory.md) don't need the project's build/tests.
+        if (result.changed.some((f) => !f.startsWith(".agent/"))) changedInTodo = true;
         result.changed.forEach((f) => s.changed.add(f));
         seen = new Set();
+        if (s.rules.afterEdit.length) observation += await this.runAfterEdit(s.rules.afterEdit, result.changed);
         // Verify: fresh diagnostics for the files just written.
         const errors = (await host.diagnostics(result.changed)).filter((d) => d.severity === "error");
         if (errors.length) {
@@ -483,15 +569,65 @@ export class Agent {
     }
   }
 
+  /**
+   * `after-edit:` hooks from rules (formatters etc.): the code runs them, not the model.
+   * Returns text for the observation: only failures, and a re-read warning when a file changed.
+   */
+  private async runAfterEdit(commands: string[], files: string[]): Promise<string> {
+    const { host } = this.deps;
+    const existing: string[] = [];
+    for (const f of files) if (/^[\w.\-/ @+]+$/.test(f) && (await host.stat(f)) === "file") existing.push(f);
+    const before = await Promise.all(existing.map((f) => host.readFile(f).catch(() => "")));
+    const notes: string[] = [];
+    for (const cmd of commands) {
+      if (cmd.includes("{files}") && !existing.length) continue;
+      const r = await host.runCommand(cmd.replace("{files}", existing.map((f) => `"${f}"`).join(" ")), undefined, { timeoutMs: 120_000 });
+      if (r.exitCode !== 0) notes.push(`After-edit hook \`${cmd}\` failed (exit ${r.exitCode}):\n${failureReport(r.output, host.root, 20)}`);
+    }
+    const after = await Promise.all(existing.map((f) => host.readFile(f).catch(() => "")));
+    const reformatted = existing.filter((_, i) => before[i] !== after[i]);
+    if (reformatted.length) notes.push(`The after-edit hook reformatted ${reformatted.join(", ")}: read it again before the next edit.`);
+    return notes.length ? `\n\n${notes.join("\n")}` : "";
+  }
+
   /** Runs verify commands from rules; returns failure text, or undefined when all pass. */
   private async verify(commands: string[], emit: (e: AgentEvent) => void): Promise<string | undefined> {
     for (const cmd of commands) {
       const r = await this.deps.host.runCommand(cmd, undefined, { timeoutMs: 300_000 }); // first build may restore packages
-      const output = `$ ${cmd}\nexit code ${r.exitCode}\n${truncateOutput(r.output, 80)}`;
+      const output = `$ ${cmd}\nexit code ${r.exitCode}\n${r.exitCode === 0 ? r.output : failureReport(r.output, this.deps.host.root, 80)}`;
       emit({ type: "verify", ok: r.exitCode === 0, output });
       if (r.exitCode !== 0) return output;
     }
     return undefined;
+  }
+
+  /** Read-only sub-run for the explore tool; its tool calls show up as status lines. */
+  private async explore(question: string, emit: (e: AgentEvent) => void, signal?: AbortSignal): Promise<string> {
+    const sub = new Agent({
+      ...this.deps,
+      nested: true,
+      reviewPlan: undefined,
+      maxStepsPerTodo: 10,
+      onEvent: (e) => {
+        if (e.type === "tool") emit({ type: "status", text: `Exploring: ${e.result.summary}` });
+      },
+    });
+    const r = await sub.run(question, "ask", signal);
+    if (r.status !== "done") throw new Error(r.summary);
+    return r.summary;
+  }
+
+  /** A separate, short model call that copies the parts of `text` relevant to `question` (long web pages). */
+  private async extract(text: string, question: string, stats: RunStats, signal?: AbortSignal): Promise<string> {
+    const res = await this.deps.provider.chat({
+      messages: [{ role: "user", content: `${EXTRACT_PROMPT(question)}\n\n<page>\n${text}\n</page>` }],
+      temperature: 0,
+      maxTokens: 1200,
+      signal,
+    });
+    stats.promptTokens += res.promptTokens ?? 0;
+    stats.outputTokens += res.outputTokens ?? 0;
+    return res.content;
   }
 
   /** Asks the user for guidance when the model is stuck. Returns false to give up. */

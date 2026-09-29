@@ -1,0 +1,11 @@
+# ollama create lolo-coder -f scripts/finetune/Modelfile   (after train_lora.py)
+FROM ../../out/lolo-lora/gguf/unsloth.Q4_K_M.gguf
+PARAMETER num_ctx 32768
+PARAMETER temperature 0.2
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""
+PARAMETER stop <|im_end|>

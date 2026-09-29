@@ -62,12 +62,38 @@ export function findImbalance(text: string): Imbalance | undefined {
  * Error text when an edit breaks a file that parsed cleanly before; else undefined.
  * Uses tree-sitter where a grammar exists, bracket balance otherwise.
  */
-export async function checkEditSyntax(path: string, before: string | undefined, after: string): Promise<string | undefined> {
+export async function checkEditSyntax(path: string, before: string | undefined, after: string, fragment?: string): Promise<string | undefined> {
   const afterErr = await syntaxError(path, after);
-  if (afterErr === null) return checkEditStructure(path, before, after); // no grammar
-  if (!afterErr) return undefined;
-  if (before !== undefined && (await syntaxError(path, before))) return undefined; // was already broken
-  return `This change would introduce a syntax error (${afterErr}). The file was NOT changed. Re-read the file and make an edit that keeps the code valid.`;
+  const problem = afterErr === null ? checkEditStructure(path, before, after) : afterErr && !(before !== undefined && (await syntaxError(path, before))) ? afterErr : undefined;
+  if (!problem) return undefined;
+  const cut = fragment !== undefined ? cutOffLine(fragment) : undefined;
+  if (cut) {
+    return (
+      `Your code stops in the middle of a line: \`${cut.slice(-80)}\`. A double quote inside the code was probably not escaped as \\" in your JSON reply, ` +
+      "which ended the string early. The file was NOT changed. Write it again and escape every \" inside the code (avoid C# verbatim strings @\"...\"; use normal strings with escapes)."
+    );
+  }
+  if (afterErr === null) return problem;
+  const view = around(after, problem);
+  return `This change would introduce a syntax error (${problem}). The file was NOT changed.${view ? `\n${view}\n` : " "}Re-read the file and make an edit that keeps the code valid.`;
+}
+
+/** The would-be file around the error line, numbered, so the model sees e.g. a duplicated `});`. */
+function around(text: string, problem: string): string {
+  const line = Number(/^line (\d+)/.exec(problem)?.[1]);
+  if (!line) return "";
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const from = Math.max(1, line - 4);
+  const to = Math.min(lines.length, line + 2);
+  const view = lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(4)}${from + i === line ? " >" : " |"} ${l}`);
+  return `The result would have been (lines ${from}-${to}):\n${view.join("\n")}`;
+}
+
+/** The last line when it looks cut off (open string, dangling `@`/operator), else undefined. */
+export function cutOffLine(text: string): string | undefined {
+  const last = text.replace(/\s+$/, "").split("\n").pop() ?? "";
+  const quotes = (last.replace(/\\./g, "").match(/"/g) ?? []).length;
+  return quotes % 2 === 1 || /(@|\$|[(,=+]|\\)$/.test(last) ? last.trim() : undefined;
 }
 
 /** Error text when the edit breaks bracket balance of a previously balanced file; else undefined. */

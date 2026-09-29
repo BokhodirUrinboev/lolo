@@ -9,7 +9,7 @@ export interface Checkpoint {
   time: Date;
 }
 
-const EXCLUDES = [".agent/checkpoints/", ".agent/trajectories/", "node_modules/", "bin/", "obj/", ".vs/"];
+const EXCLUDES = [".agent/checkpoints/", ".agent/trajectories/", ".agent/index/", ".agent/cache/", "node_modules/", "bin/", "obj/", ".vs/"];
 
 /**
  * Snapshots of the workspace in a shadow git repo at `.agent/checkpoints`, using

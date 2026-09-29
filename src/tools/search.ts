@@ -56,3 +56,22 @@ function exec(cmd: string, args: string[], cwd: string, signal?: AbortSignal) {
     p.on("close", (code) => resolve({ code: code ?? 2, stdout, stderr }));
   });
 }
+
+export const semanticSearch: ToolDef<{ query: string }> = {
+  name: "semantic_search",
+  kind: "read",
+  description: "Find code by meaning when you don't know the exact names (e.g. \"where are passwords hashed\"). Returns the best matching functions/blocks.",
+  params: { type: "object", properties: { query: { type: "string", minLength: 3 } }, required: ["query"] },
+  available: (ctx) => !!ctx.semantic,
+  async run(a, ctx) {
+    const hits = await ctx.semantic!.search(a.query, 8, ctx.signal);
+    if (!hits.length) return ok("The index is empty.", `semantic_search "${a.query}": no results`);
+    const out: string[] = [];
+    for (const h of hits) {
+      const lines = (await ctx.host.readFile(h.path).catch(() => "")).replace(/\r\n/g, "\n").split("\n");
+      const preview = lines.slice(h.line - 1, Math.min(h.endLine, h.line + 5)).join("\n");
+      out.push(`${h.path}:${h.line}-${h.endLine} (score ${h.score.toFixed(2)})\n${preview}`);
+    }
+    return ok(out.join("\n\n"), `semantic_search "${a.query}": ${hits.slice(0, 3).map((h) => `${h.path}:${h.line}`).join(", ")}`);
+  },
+};

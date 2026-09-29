@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+Stages 11–14 of the plan: stronger tools, web, MCP, memory. Every optional tool is offered only when a task needs it, so small models still see ≤ 10 tools per step.
+
+- Refactoring by code: `rename_symbol` (language server in VS Code, tree-sitter elsewhere) renames definitions, imports and calls across files in one reviewed step; `find_references`, `find_definition`, `read_symbol`; `move_file`/`delete_file`; read-only `git_diff`/`git_log`/`git_blame`.
+- `start_process` runs a server in the background until it is ready, so it can be tried with `curl`; everything is stopped when the task ends.
+- Test output parsing for vitest/jest, node:test, pytest, unittest, dotnet test and cargo test: failures first, as `file:line name: message`.
+- Rules hooks: `after-edit:` (e.g. a formatter) and `before-done:`.
+- Web search (off by default): SearXNG, Brave, Tavily or DuckDuckGo; `fetch_url` with private-network blocking and relevant-part extraction for long pages; `@web`; `@docs:<package>` for the installed package's README.
+- MCP: servers from `.agent/mcp.json`, `.vscode/mcp.json` or settings (stdio and HTTP). Tools are picked per task, calls are approved unless read-only, resources are `@mcp:` mentions, prompts are `/` commands, `/mcp` shows status. `cli --mcp-server` serves Agent Lolo's own tools to other agents.
+- Memory: "remember …" saves facts to `.agent/memory.md` (reviewed), which every later conversation sees; `/memory`.
+- Custom `/` commands from `.agent/commands/*.md`.
+- Pasted screenshots for vision models (qwen3.5).
+- Semantic code search with a local embedding model (`localAgent.embeddingModel`).
+- An explore helper for vague tasks in large repositories.
+- `move_file` updates the imports itself: relative `require`/`import`/`export ... from` in JS/TS (including the moved file's own) and module imports in Python.
+- Fixes: a complete rewrite with a comment such as `// Existing tests...` was treated as a lazy placeholder and rejected as a syntax error; syntax-error feedback now shows the would-be code around the error, and replies cut short by an unescaped quote get an explanation the model can act on; empty files read as "empty" instead of showing only the edit hint (models copied the hint into `search`), and `create_file` refuses empty content; questions that get stuck are answered with what was found.
+- Eval: 14 tasks (JS, Python, C#, Go), including renames, moves, a large file and a multi-file extraction. `scripts/finetune` prepares a LoRA fine-tune from successful runs.
+
 ## 0.3.1
 
 - README: screenshots, quick start, mode and model guides.

@@ -1,0 +1,1 @@
+{"task": "Add a static method Slugify(string text) to TextUtils in TextUtils.cs: lowercase, trim, runs of spaces or dashes become a single '-', and every other character that is not a-z or 0-9 is dropped. Example: \"  Hello, World!  \" -> \"hello-world\".", "check": "dotnet run --project . -v q"}

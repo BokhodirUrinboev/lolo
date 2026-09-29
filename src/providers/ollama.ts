@@ -62,6 +62,28 @@ export class OllamaProvider implements LLMProvider {
     return out;
   }
 
+  async supportsImages(): Promise<boolean | undefined> {
+    try {
+      const res = await fetch(this.baseUrl.replace(/\/$/, "") + "/api/show", { method: "POST", body: JSON.stringify({ model: this.profile.id }) });
+      if (!res.ok) return undefined;
+      const caps = ((await res.json()) as { capabilities?: string[] }).capabilities;
+      return caps ? caps.includes("vision") : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async embed(texts: string[], model: string, signal?: AbortSignal): Promise<number[][]> {
+    const res = await fetch(this.baseUrl.replace(/\/$/, "") + "/api/embed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, input: texts, truncate: true }),
+      signal,
+    });
+    if (!res.ok) throw new ProviderError(`Ollama /api/embed: HTTP ${res.status} ${await res.text()}`, res.status);
+    return ((await res.json()) as { embeddings: number[][] }).embeddings;
+  }
+
   private options(temperature?: number, maxTokens?: number) {
     return {
       ...this.profile.ollamaOptions,

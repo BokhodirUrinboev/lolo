@@ -5,6 +5,8 @@ export type Role = "system" | "user" | "assistant";
 export interface ChatMessage {
   role: Role;
   content: string;
+  /** Base64 images (PNG/JPEG, no data: prefix) for vision models. */
+  images?: string[];
 }
 
 export interface ChatRequest {
@@ -55,6 +57,10 @@ export interface LLMProvider {
   chat(req: ChatRequest): Promise<ChatResponse>;
   /** Raw completion without chat template; used for FIM autocomplete. */
   complete(req: CompletionRequest): Promise<string>;
+  /** Whether the model accepts images; undefined when the endpoint can't tell. */
+  supportsImages?(): Promise<boolean | undefined>;
+  /** Embedding vectors from `model` (semantic search); absent when the endpoint has none. */
+  embed?(texts: string[], model: string, signal?: AbortSignal): Promise<number[][]>;
 }
 
 export class ProviderError extends Error {

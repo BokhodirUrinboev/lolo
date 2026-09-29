@@ -19,6 +19,12 @@ export interface Host {
    * editor so native undo works. Resolves to whether it was applied.
    */
   proposeWrite(path: string, content: string, info: { isNew: boolean; reason: string }): Promise<WriteOutcome>;
+  /** Several writes reviewed together with one approval (e.g. a rename across files). */
+  proposeWrites(changes: FileChange[], reason: string): Promise<WriteOutcome>;
+  /** Renames/moves a file or folder (creating parent folders) after asking the user; imports may be updated by the editor. */
+  moveFile(from: string, to: string): Promise<WriteOutcome>;
+  /** Deletes a file or folder after asking the user. */
+  deleteFile(path: string): Promise<WriteOutcome>;
   /** Errors and warnings; for the given files, or the whole workspace. */
   diagnostics(paths?: string[]): Promise<Diagnostic[]>;
   /** Runs a shell command. `cwd` is workspace-relative; on timeout the command is stopped and `timedOut` set. */
@@ -31,13 +37,30 @@ export interface Host {
   editorContext?(): Promise<EditorContext | undefined>;
   /** Workspace symbol search (LSP); headless hosts fall back to tree-sitter. */
   workspaceSymbols?(query: string): Promise<SymbolLocation[]>;
+  /** LSP references of the symbol at `pos` (including its declaration); undefined when no language server answers. */
+  references?(pos: SourcePos): Promise<SourcePos[] | undefined>;
+  /** LSP rename of the symbol at `pos`: the new content of each changed file, not applied yet. undefined when no language server can rename it. */
+  renameEdits?(pos: SourcePos, newName: string): Promise<FileChange[] | undefined>;
   /** Path to a ripgrep binary, if the host knows one. */
   rgPath?(): string | undefined;
+}
+
+/** A position in a workspace file: 1-based line, 0-based column. */
+export interface SourcePos {
+  path: string;
+  line: number;
+  column: number;
+}
+
+export interface FileChange {
+  path: string;
+  content: string;
 }
 
 /** Something the user must approve (shown as a card in the chat). */
 export type ApprovalRequest =
   | { kind: "edit"; path: string; isNew: boolean; reason: string; before: string; after: string }
+  | { kind: "edits"; reason: string; files: { path: string; before: string; after: string }[] }
   | { kind: "command"; command: string; reason: string };
 
 export interface Approval {

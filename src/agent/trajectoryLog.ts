@@ -25,7 +25,9 @@ export class TrajectoryLog {
     let from = 0;
     while (from < messages.length && from < this.lastMessages.length && sameMessage(messages[from], this.lastMessages[from])) from++;
     this.lastMessages = messages;
-    this.write("llm", { kind, from, messages: messages.slice(from), response, ...meta });
+    // Images are logged as a count, not as base64.
+    const logged = messages.slice(from).map((m) => (m.images?.length ? { ...m, images: `${m.images.length} image(s)` } : m));
+    this.write("llm", { kind, from, messages: logged, response, ...meta });
   }
 }
 

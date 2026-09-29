@@ -40,7 +40,7 @@ interface TaskResult {
   checkOutput: string;
 }
 
-const ALLOW = ["node --test", "npm test", "dotnet build", "dotnet test", "dotnet run", "python3 -m unittest", "python -m unittest", "ls", "cat", "git status", "git diff"];
+const ALLOW = ["node --test", "npm test", "dotnet build", "dotnet test", "dotnet run", "python3 -m unittest", "python -m unittest", "go test", "go build", "go vet", "ls", "cat", "git status", "git diff"];
 
 async function run(argv: string[]) {
   const { values } = parseArgs({
@@ -55,6 +55,7 @@ async function run(argv: string[]) {
       "tool-mode": { type: "string" },
       runs: { type: "string", default: "1" },
       "max-steps": { type: "string", default: "15" },
+      "embed-model": { type: "string" },
     },
   });
   const ids = readdirSync(values.tasks!)
@@ -88,6 +89,7 @@ async function run(argv: string[]) {
         provider,
         commandAllowlist: [...ALLOW, ...(spec.allow ?? [])],
         maxStepsPerTodo: Number(values["max-steps"]),
+        embeddingModel: values["embed-model"],
       });
       const res = await agent.run(spec.task, spec.mode ?? "agent");
 

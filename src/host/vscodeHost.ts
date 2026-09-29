@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import type { EditorContext } from "../context/collectors";
 import type { SymbolLocation } from "../context/mentions";
 import type { DiffReviewManager } from "../edit/diffView";
-import { Approval, ApprovalRequest, CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, Host, WriteOutcome } from "./types";
+import { Approval, ApprovalRequest, CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, FileChange, Host, SourcePos, WriteOutcome } from "./types";
 
 export interface VsCodeHostOptions {
   autoApproveEdits: () => boolean;
@@ -86,6 +86,68 @@ export class VsCodeHost implements Host {
     const doc = await vscode.workspace.openTextDocument(target);
     await doc.save();
     return { applied: true };
+  }
+
+  /** One approval card for all files (a rename), then one WorkspaceEdit so a single undo reverts it. */
+  async proposeWrites(changes: FileChange[], reason: string): Promise<WriteOutcome> {
+    const files = await Promise.all(changes.map(async (c) => ({ path: c.path, before: await this.readFile(c.path).catch(() => ""), after: c.content })));
+    if (!this.opts.autoApproveEdits()) {
+      const a = this.approvalHandler
+        ? await this.approvalHandler({ kind: "edits", reason, files })
+        : { ok: await this.confirm(`Apply ${reason} to ${changes.map((c) => c.path).join(", ")}?`) };
+      if (!a.ok) return { applied: false, note: a.feedback };
+    }
+    const edit = new vscode.WorkspaceEdit();
+    for (const c of changes) {
+      const doc = await vscode.workspace.openTextDocument(this.uri(c.path));
+      edit.replace(doc.uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), c.content);
+    }
+    if (!(await vscode.workspace.applyEdit(edit))) return { applied: false };
+    for (const c of changes) await (await vscode.workspace.openTextDocument(this.uri(c.path))).save();
+    return { applied: true };
+  }
+
+  async references(pos: SourcePos): Promise<SourcePos[] | undefined> {
+    try {
+      const doc = await vscode.workspace.openTextDocument(this.uri(pos.path));
+      const locs = await vscode.commands.executeCommand<vscode.Location[]>(
+        "vscode.executeReferenceProvider",
+        doc.uri,
+        new vscode.Position(pos.line - 1, pos.column),
+      );
+      if (!locs?.length) return undefined;
+      return locs
+        .filter((l) => l.uri.scheme === "file" && l.uri.fsPath.startsWith(this.root))
+        .map((l) => ({ path: this.rel(l.uri), line: l.range.start.line + 1, column: l.range.start.character }));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Runs the language server's rename and returns the resulting file contents without applying them. */
+  async renameEdits(pos: SourcePos, newName: string): Promise<FileChange[] | undefined> {
+    try {
+      const doc = await vscode.workspace.openTextDocument(this.uri(pos.path));
+      const edit = await vscode.commands.executeCommand<vscode.WorkspaceEdit | undefined>(
+        "vscode.executeDocumentRenameProvider",
+        doc.uri,
+        new vscode.Position(pos.line - 1, pos.column),
+        newName,
+      );
+      if (!edit || edit.size === 0) return undefined;
+      const out: FileChange[] = [];
+      for (const [uri, edits] of edit.entries()) {
+        if (uri.scheme !== "file" || !uri.fsPath.startsWith(this.root)) return undefined; // would touch files outside the workspace
+        const d = await vscode.workspace.openTextDocument(uri);
+        let text = d.getText();
+        const sorted = [...edits].sort((a, b) => d.offsetAt(b.range.start) - d.offsetAt(a.range.start));
+        for (const e of sorted) text = text.slice(0, d.offsetAt(e.range.start)) + e.newText + text.slice(d.offsetAt(e.range.end));
+        out.push({ path: this.rel(uri), content: text });
+      }
+      return out;
+    } catch {
+      return undefined; // no rename provider, or the position is not renameable
+    }
   }
 
   /**
@@ -218,6 +280,24 @@ export class VsCodeHost implements Host {
   async approveCommand(command: string, reason: string): Promise<Approval> {
     if (this.approvalHandler) return this.approvalHandler({ kind: "command", command, reason });
     return { ok: await this.confirm(`Run \`${command}\`? (${reason})`) };
+  }
+
+  /** File moves and deletes always ask, even with auto-approved edits (reuses the command approval card). */
+  async moveFile(from: string, to: string): Promise<WriteOutcome> {
+    const a = await this.approveCommand(`move ${from} → ${to}`, "moves the file");
+    if (!a.ok) return { applied: false, note: a.feedback };
+    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.uri(to), ".."));
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(this.uri(from), this.uri(to), { overwrite: false });
+    return { applied: await vscode.workspace.applyEdit(edit) };
+  }
+
+  async deleteFile(p: string): Promise<WriteOutcome> {
+    const a = await this.approveCommand(`delete ${p}`, "deletes the file (a checkpoint was taken before the run)");
+    if (!a.ok) return { applied: false, note: a.feedback };
+    const edit = new vscode.WorkspaceEdit();
+    edit.deleteFile(this.uri(p), { recursive: true });
+    return { applied: await vscode.workspace.applyEdit(edit) };
   }
 
   /** Set by the chat panel during a run so questions appear in the conversation. */

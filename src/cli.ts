@@ -2,16 +2,21 @@
  * Headless agent: `node dist/cli.js [options] "task"`. Used for manual testing
  * and by the eval runner. Edits are auto-approved (a checkpoint is taken first).
  */
+import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { Agent, AgentEvent, RunOptions, RunResult } from "./agent/loop";
+import { expandSlashCommand } from "./context/slashCommands";
 import { Checkpoints } from "./edit/checkpoints";
 import { NodeHost } from "./host/nodeHost";
+import { loadMcpConfig, McpHub } from "./mcp/hub";
+import { serveMcp } from "./mcp/server";
 import { createProvider } from "./providers";
 import type { ModelProfile } from "./providers/modelProfiles";
 import type { AgentMode } from "./tools/registry";
 import type { Turn } from "./ui/protocol";
 import { applyEvent, conversationText, pendingPlanFor } from "./ui/transcript";
+import type { WebConfig, WebProvider } from "./web/search";
 
 const c = { dim: "\x1b[2m", red: "\x1b[31m", green: "\x1b[32m", yellow: "\x1b[33m", cyan: "\x1b[36m", reset: "\x1b[0m" };
 const DEFAULT_ALLOWLIST = ["dotnet build", "dotnet test", "npm test", "npm run build", "npm run lint", "npx tsc", "node --test", "git status", "git diff", "git log", "ls", "cat", "pwd"];
@@ -27,11 +32,15 @@ const { values, positionals } = parseArgs({
     "tool-mode": { type: "string" },
     "api-key": { type: "string", default: "" },
     "max-steps": { type: "string", default: "15" },
+    "embed-model": { type: "string" },
+    web: { type: "string" },
+    "searxng-url": { type: "string" },
     yes: { type: "boolean", short: "y", default: false },
     json: { type: "boolean", default: false },
     checkpoints: { type: "boolean", default: false },
     chat: { type: "boolean", default: false },
     restore: { type: "string" },
+    "mcp-server": { type: "boolean", default: false },
   },
 });
 
@@ -47,7 +56,13 @@ async function checkpointCommand() {
   console.log(`restored to ${target.id.slice(0, 8)} (${target.label}); the previous state is saved as "before restore to ${target.id.slice(0, 8)}"`);
 }
 
-if (values.checkpoints || values.restore) {
+if (values["mcp-server"]) {
+  // stdout carries the MCP protocol: nothing else may print there.
+  serveMcp(path.resolve(values.root!)).catch((e) => {
+    console.error(e.message);
+    process.exit(1);
+  });
+} else if (values.checkpoints || values.restore) {
   checkpointCommand().then(
     () => process.exit(0),
     (e) => {
@@ -66,7 +81,7 @@ function main() {
     return;
   }
   if (!task) {
-    console.error('usage: cli [--root DIR] [--mode agent|ask|plan] [--model ID] [--provider ollama|openai] [--endpoint URL] [--tool-mode schema|native|xml] [-y] [--json] "task"\n       cli [--root DIR] --checkpoints | --restore <id>');
+    console.error('usage: cli [--root DIR] [--mode agent|ask|plan] [--model ID] [--provider ollama|openai] [--endpoint URL] [--tool-mode schema|native|xml] [--embed-model ID] [--web searxng|brave|tavily|duckduckgo] [-y] [--json] "task"\n       cli [--root DIR] --checkpoints | --restore <id>\n       cli [--root DIR] --mcp-server   (Agent Lolo tools over MCP stdio)');
     process.exit(2);
   }
 
@@ -82,9 +97,11 @@ function main() {
   const abort = new AbortController();
   process.on("SIGINT", () => abort.abort());
 
-  const agent = new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent: print, maxStepsPerTodo: Number(values["max-steps"]) });
-  agent.run(task, values.mode as AgentMode, abort.signal).then((r) => {
+  const mcp = mcpHub(values.root!);
+  const agent = new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent: print, maxStepsPerTodo: Number(values["max-steps"]), embeddingModel: values["embed-model"], web: webConfig(), mcp });
+  agent.run(task, values.mode as AgentMode, abort.signal).then(async (r) => {
     rl?.close();
+    await mcp?.close();
     if (values.json) console.log(JSON.stringify(r));
     else printResult(r);
     process.exit(r.status === "done" || r.status === "planned" ? 0 : 1);
@@ -98,8 +115,9 @@ function main() {
  */
 async function chat() {
   const host = new NodeHost(values.root!, { autoApprove: true, interactive: false, confirm: async () => !!values.yes });
+  const mcp = mcpHub(values.root!);
   const agent = (onEvent: (e: AgentEvent) => void) =>
-    new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent, maxStepsPerTodo: Number(values["max-steps"]) });
+    new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent, maxStepsPerTodo: Number(values["max-steps"]), embeddingModel: values["embed-model"], web: webConfig(), mcp });
   let turns: Turn[] = [];
   const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: !!process.stdin.isTTY });
   const prompt = () => process.stdin.isTTY && process.stderr.write(`${c.cyan}> ${c.reset}`);
@@ -122,6 +140,15 @@ async function chat() {
     let plan: RunOptions["plan"];
     const m = /^\/(ask|plan|agent)\s+([\s\S]+)/.exec(line);
     if (m) [mode, text] = [m[1] as AgentMode, m[2]];
+    else if (line.startsWith("/") && line !== "/run") {
+      const expanded = await expandSlashCommand(line, host, mcp);
+      if (expanded === undefined) {
+        console.log(`${c.red}unknown command${c.reset} (user commands are .md files in .agent/commands)`);
+        prompt();
+        continue;
+      }
+      text = expanded;
+    }
     if (line === "/run") {
       const last = [...turns].reverse().flatMap((t) => t.items).find((i) => i.kind === "plan");
       if (last?.kind !== "plan") {
@@ -152,6 +179,7 @@ async function chat() {
     prompt();
   }
   rl.close();
+  await mcp?.close();
 }
 
 
@@ -164,6 +192,18 @@ function makeProvider() {
     model: values.model!,
     profiles: toolMode ? [{ match: values.model!, toolMode }] : [],
   });
+}
+
+/** MCP servers from .agent/mcp.json / .vscode/mcp.json, if any. */
+function mcpHub(root: string): McpHub | undefined {
+  const configs = loadMcpConfig(path.resolve(root));
+  return Object.keys(configs).length ? new McpHub(configs, path.resolve(root), (m) => console.error(`${c.dim}${m}${c.reset}`)) : undefined;
+}
+
+/** `--web <provider>`; Brave/Tavily keys come from LOLO_WEB_API_KEY. */
+function webConfig(): WebConfig | undefined {
+  if (!values.web) return undefined;
+  return { provider: values.web as WebProvider, searxngUrl: values["searxng-url"], apiKey: process.env.LOLO_WEB_API_KEY };
 }
 
 function printResult(r: RunResult) {

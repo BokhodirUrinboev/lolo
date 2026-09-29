@@ -3,3 +3,5 @@ dist/
 *.vsix
 .agent/checkpoints/
 .agent/trajectories/
+.agent/index/
+.agent/cache/

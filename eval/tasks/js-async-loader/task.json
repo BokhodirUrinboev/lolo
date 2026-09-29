@@ -1,0 +1,1 @@
+{"task": "loadAll(ids, load) in src/loader.js returns before the loads finish. Make it wait for all of them and return the results in the same order as ids.", "check": "node --test"}

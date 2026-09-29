@@ -30,7 +30,27 @@ const TOOL_VERB: Record<string, string> = {
   create_file: "Create",
   run_command: "Bash",
   ask_user: "Ask",
+  read_symbol: "Read",
+  semantic_search: "Search",
+  find_definition: "Definition",
+  find_references: "References",
+  rename_symbol: "Rename",
+  move_file: "Move",
+  delete_file: "Delete",
+  git_diff: "Git diff",
+  git_log: "Git log",
+  git_blame: "Git blame",
+  start_process: "Start",
+  process_logs: "Logs",
+  web_search: "Web search",
+  fetch_url: "Fetch",
 };
+
+/** "mcp__notes__list_notes" → "notes · list_notes". */
+function mcpLabel(tool: string): string {
+  const [prefix, server, ...rest] = tool.split("__");
+  return prefix === "mcp" && server && rest.length ? `${server} · ${rest.join("__")}` : tool;
+}
 
 const SLASH: { cmd: string; hint: string; run: () => void }[] = [
   { cmd: "/new", hint: "Start a new conversation", run: () => post({ type: "newChat" }) },
@@ -41,6 +61,8 @@ const SLASH: { cmd: string; hint: string; run: () => void }[] = [
   { cmd: "/restore", hint: "Restore a checkpoint", run: () => post({ type: "command", id: "restoreCheckpoint" }) },
   { cmd: "/edit", hint: "Edit the selection in the editor (Ctrl+I)", run: () => post({ type: "command", id: "inlineEdit" }) },
   { cmd: "/settings", hint: "Open Agent Lolo settings", run: () => post({ type: "command", id: "openSettings" }) },
+  { cmd: "/mcp", hint: "Show MCP server status", run: () => post({ type: "mcpStatus" }) },
+  { cmd: "/memory", hint: "Edit what Agent Lolo remembers (.agent/memory.md)", run: () => post({ type: "command", id: "openMemory" }) },
 ];
 
 const Icon = ({ name, spin }: { name: string; spin?: boolean }) => <i className={`codicon codicon-${name}${spin ? " codicon-modifier-spin" : ""}`} />;
@@ -52,6 +74,7 @@ export function App() {
   const [streaming, setStreaming] = useState<{ thought: string; answer?: string }>();
   const [review, setReview] = useState<{ todos: string[]; goal?: string }>();
   const [mentions, setMentions] = useState<{ label: string; detail?: string }[]>([]);
+  const [userCommands, setUserCommands] = useState<{ cmd: string; hint: string }[]>([]);
   const [insert, setInsert] = useState<{ text: string; n: number }>();
   const [showHistory, setShowHistory] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
@@ -67,6 +90,7 @@ export function App() {
       } else if (m.type === "streaming") setStreaming({ thought: m.thought, answer: m.answer });
       else if (m.type === "planReview") setReview({ todos: m.todos, goal: m.goal });
       else if (m.type === "mentionResults") setMentions(m.items);
+      else if (m.type === "slashResults") setUserCommands(m.items);
       else if (m.type === "insertText") setInsert((p) => ({ text: m.text, n: (p?.n ?? 0) + 1 }));
     };
     window.addEventListener("message", onMessage);
@@ -100,7 +124,7 @@ export function App() {
         </div>
       )}
       {state.setup && <SetupBanner setup={state.setup} />}
-      <Composer state={state} mentions={mentions} clearMentions={() => setMentions([])} insert={insert} />
+      <Composer state={state} mentions={mentions} clearMentions={() => setMentions([])} insert={insert} userCommands={userCommands} />
     </div>
   );
 }
@@ -230,8 +254,13 @@ function ItemView({ item, turnId, running }: { item: Item; turnId: string; runni
     case "user":
       return (
         <div className="user-msg">
-          {(item.context?.length || item.mode !== "agent") && (
+          {(item.context?.length || item.images || item.mode !== "agent") && (
             <div className="chips">
+              {!!item.images && (
+                <span className="chip">
+                  <Icon name="file-media" /> {item.images === 1 ? "1 image" : `${item.images} images`}
+                </span>
+              )}
               {item.context?.map((f) => (
                 <span className="chip" key={f} title={f} onClick={() => post({ type: "openFile", path: f })}>
                   <Icon name="file-code" /> {basename(f)}
@@ -266,7 +295,7 @@ function ItemView({ item, turnId, running }: { item: Item; turnId: string; runni
         </Row>
       );
     case "tool":
-      return <ToolRow verb={TOOL_VERB[item.tool] ?? item.tool} target={item.target} summary={summaryOf(item.title)} ok={item.ok} output={item.output} />;
+      return <ToolRow verb={TOOL_VERB[item.tool] ?? mcpLabel(item.tool)} target={item.target} summary={summaryOf(item.title)} ok={item.ok} output={item.output} />;
     case "verify":
       return <ToolRow verb="Check" target={firstLine(item.output).replace(/^\$ /, "")} summary={item.ok ? "passed" : "failed"} ok={item.ok} output={item.output} openInitially={!item.ok} />;
     case "invalid":
@@ -547,13 +576,16 @@ function Composer({
   mentions,
   clearMentions,
   insert,
+  userCommands,
 }: {
   state: ViewState;
   mentions: { label: string; detail?: string }[];
   clearMentions: () => void;
   insert?: { text: string; n: number };
+  userCommands: { cmd: string; hint: string }[];
 }) {
   const [text, setText] = useState(() => uiState.get("draft", ""));
+  const [images, setImages] = useState<string[]>([]);
   const [query, setQuery] = useState<string | null>(null);
   const [sel, setSel] = useState(0);
   const [menu, setMenu] = useState<"mode" | null>(null);
@@ -585,9 +617,17 @@ function Composer({
     return () => window.removeEventListener("keydown", onKey);
   }, [state.running]);
 
-  const slash = useMemo(() => (/^\/\S*$/.test(text) ? SLASH.filter((c) => c.cmd.startsWith(text)) : []), [text]);
+  // User commands (.agent/commands, MCP prompts) are inserted with a space so arguments can follow.
+  const slash = useMemo(() => {
+    if (!/^\/\S*$/.test(text)) return [];
+    const user = userCommands.map((c) => ({ cmd: c.cmd, hint: c.hint, run: () => undefined, insert: true }));
+    return [...SLASH.map((c) => ({ ...c, insert: false })), ...user].filter((c) => c.cmd.startsWith(text));
+  }, [text, userCommands]);
+  useEffect(() => {
+    if (text === "/") post({ type: "slashQuery" });
+  }, [text]);
   const popup: { label: string; detail?: string; pick: () => void }[] = slash.length
-    ? slash.map((c) => ({ label: c.cmd, detail: c.hint, pick: () => (c.run(), setText("")) }))
+    ? slash.map((c) => ({ label: c.cmd, detail: c.hint, pick: () => (c.insert ? (setText(`${c.cmd} `), area.current?.focus()) : (c.run(), setText(""))) }))
     : query !== null
       ? mentions.map((m) => ({ label: `@${m.label}`, detail: m.detail, pick: () => pickMention(m.label) }))
       : [];
@@ -616,9 +656,22 @@ function Composer({
   };
 
   const send = () => {
-    if (!text.trim() || state.running) return;
-    post({ type: "send", text: text.trim(), mode: state.mode, includeActiveFile: includeActive });
+    if ((!text.trim() && !images.length) || state.running) return;
+    post({ type: "send", text: text.trim(), mode: state.mode, includeActiveFile: includeActive, images: images.length ? images.map((i) => i.split(",")[1]) : undefined });
     setText("");
+    setImages([]);
+  };
+
+  // Pasted screenshots (data URLs) go with the next message; vision models only.
+  const onPaste = (e: React.ClipboardEvent) => {
+    const files = [...e.clipboardData.items].filter((i) => i.type.startsWith("image/")).map((i) => i.getAsFile()).filter((f): f is File => !!f);
+    if (!files.length) return;
+    e.preventDefault();
+    for (const f of files.slice(0, 4)) {
+      const reader = new FileReader();
+      reader.onload = () => setImages((list) => (list.length < 4 ? [...list, String(reader.result)] : list));
+      reader.readAsDataURL(f);
+    }
   };
 
   const onKey = (e: React.KeyboardEvent) => {
@@ -669,7 +722,19 @@ function Composer({
         </div>
       )}
       <div className={`composer ${state.running ? "busy" : ""}`}>
-        <textarea ref={area} rows={1} value={text} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} onKeyDown={onKey} />
+        {!!images.length && (
+          <div className="attachments">
+            {images.map((src, i) => (
+              <span className="thumb" key={i}>
+                <img src={src} alt={`pasted image ${i + 1}`} />
+                <button className="icon-btn" title="Remove" onClick={() => setImages((l) => l.filter((_, j) => j !== i))}>
+                  <Icon name="close" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <textarea ref={area} rows={1} value={text} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} onKeyDown={onKey} onPaste={onPaste} />
         <div className="toolbar">
           <button className="icon-btn" title="Attach a file" onClick={() => post({ type: "pickFile" })}>
             <Icon name="add" />
@@ -708,7 +773,7 @@ function Composer({
               <Icon name="debug-stop" />
             </button>
           ) : (
-            <button className="send" title="Send (Enter)" disabled={!text.trim()} onClick={send}>
+            <button className="send" title="Send (Enter)" disabled={!text.trim() && !images.length} onClick={send}>
               <Icon name="arrow-up" />
             </button>
           )}

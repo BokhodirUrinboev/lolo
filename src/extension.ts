@@ -5,10 +5,12 @@ import { Checkpoints } from "./edit/checkpoints";
 import { DiffReviewManager } from "./edit/diffView";
 import { VsCodeHost } from "./host/vscodeHost";
 import { inlineEdit } from "./inline/inlineEdit";
+import { configKey, loadMcpConfig, McpHub, McpServerConfig } from "./mcp/hub";
 import { createProvider, ProviderConfig } from "./providers";
 import { resolveProfile, type ProfileOverride } from "./providers/modelProfiles";
 import { ChatBackend, ChatViewProvider } from "./ui/chatView";
 import type { Mode } from "./ui/protocol";
+import type { WebConfig, WebProvider } from "./web/search";
 
 const cfg = () => vscode.workspace.getConfiguration("localAgent");
 const PROPOSED_SCHEME = "local-agent-proposed";
@@ -24,6 +26,15 @@ function providerConfig(model = cfg().get("model", DEFAULT_MODEL)): ProviderConf
     model,
     profiles: c.get<ProfileOverride[]>("profiles", []),
   };
+}
+
+const WEB_KEY_SECRET = "localAgent.web.apiKey";
+
+/** Web search settings; undefined (web tools hidden) unless the user picked a provider. */
+async function webConfig(context: vscode.ExtensionContext): Promise<WebConfig | undefined> {
+  const provider = cfg().get<string>("web.search", "off");
+  if (provider === "off") return undefined;
+  return { provider: provider as WebProvider, searxngUrl: cfg().get<string>("web.searxngUrl", "") || undefined, apiKey: (await context.secrets.get(WEB_KEY_SECRET)) || undefined };
 }
 
 /** Exported for the integration smoke test. */
@@ -49,6 +60,28 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
     return h;
   };
 
+  // MCP servers stay connected between runs; reconnected when their configuration changes.
+  let mcp: { key: string; hub: McpHub } | undefined;
+  const mcpFor = (folder: vscode.WorkspaceFolder): McpHub | undefined => {
+    const configs = loadMcpConfig(
+      folder.uri.fsPath,
+      cfg().get<Record<string, McpServerConfig>>("mcpServers", {}),
+      vscode.workspace.getConfiguration("mcp").get<Record<string, McpServerConfig>>("servers", {}),
+    );
+    if (!Object.keys(configs).length) {
+      void mcp?.hub.close();
+      mcp = undefined;
+      return undefined;
+    }
+    const key = folder.uri.toString() + configKey(configs);
+    if (mcp?.key !== key) {
+      void mcp?.hub.close();
+      mcp = { key, hub: new McpHub(configs, folder.uri.fsPath, (m) => output.appendLine(m)) };
+    }
+    return mcp.hub;
+  };
+  context.subscriptions.push({ dispose: () => void mcp?.hub.close() });
+
   const backend: ChatBackend = {
     async run(text, mode, hooks, opts) {
       const folder = activeFolder();
@@ -62,6 +95,9 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
         provider,
         commandAllowlist: cfg().get<string[]>("commandAllowlist", []),
         maxStepsPerTodo: cfg().get("maxStepsPerTodo", 15),
+        embeddingModel: cfg().get<string>("embeddingModel", "") || undefined,
+        web: await webConfig(context),
+        mcp: mcpFor(folder),
         onEvent: hooks.onEvent,
         reviewPlan: mode === "agent" && cfg().get("reviewPlan", false) ? hooks.reviewPlan : undefined,
       });
@@ -103,6 +139,10 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
     host: () => {
       const f = activeFolder();
       return f ? hostFor(f) : undefined;
+    },
+    mcp: () => {
+      const f = activeFolder();
+      return f ? mcpFor(f) : undefined;
     },
   };
   const chat = new ChatViewProvider(context, backend);
@@ -149,6 +189,13 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
     vscode.commands.registerCommand("localAgent.cancel", () => chat.cancel()),
     vscode.commands.registerCommand("localAgent.inlineEdit", () => inlineEdit(review, () => createProvider(providerConfig()))),
     vscode.commands.registerCommand("localAgent.restoreCheckpoint", restoreCheckpoint),
+    vscode.commands.registerCommand("localAgent.setWebApiKey", async () => {
+      const key = await vscode.window.showInputBox({ title: "Web search API key (Brave or Tavily)", password: true, ignoreFocusOut: true, prompt: "Stored in VS Code's secret storage. Leave empty to remove it." });
+      if (key === undefined) return;
+      if (key.trim()) await context.secrets.store(WEB_KEY_SECRET, key.trim());
+      else await context.secrets.delete(WEB_KEY_SECRET);
+      void vscode.window.showInformationMessage(key.trim() ? "Web search API key saved." : "Web search API key removed.");
+    }),
     vscode.commands.registerCommand("localAgent.toggleAutocomplete", async () => {
       const on = !cfg().get("autocomplete.enabled", true);
       await cfg().update("autocomplete.enabled", on, vscode.ConfigurationTarget.Global);

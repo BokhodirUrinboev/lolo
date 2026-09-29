@@ -1,0 +1,1 @@
+{"task": "Move src/utils/format.js to src/lib/format.js and update every require that points to it.", "check": "test -f src/lib/format.js && test ! -e src/utils/format.js && node --test"}

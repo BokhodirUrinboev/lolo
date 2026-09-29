@@ -1,6 +1,8 @@
 import { decideCommand } from "./commandPolicy";
 import { truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
+import { startProcess } from "./processes";
+import { failureReport } from "./testReport";
 import { fail, ok, ToolContext, ToolDef } from "./types";
 
 export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
@@ -20,7 +22,12 @@ export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
   },
   async run(a, ctx) {
     const server = await serverReason(a.command, a.cwd ?? ".", ctx);
-    if (server) return fail(`Not run: ${server}`, `run_command "${a.command}": refused (server)`);
+    if (server) {
+      // The todo may really need the server running (e.g. "check the endpoint with curl"): offer start_process.
+      const bg = ctx.processes ? ` If the task needs it running (to call it with curl), use start_process instead: ${startProcess.description.split(". ")[0]}.` : "";
+      if (ctx.processes) (ctx.needs ??= new Set()).add("process");
+      return fail(`Not run: ${server}${bg}`, `run_command "${a.command}": refused (server)`);
+    }
     const decision = decideCommand(a.command, ctx.commandAllowlist);
     if (decision.kind === "block") return fail(`Command blocked (${decision.reason}). Do not retry it.`, `run_command "${a.command}": blocked`);
     if (decision.kind === "confirm") {
@@ -33,7 +40,7 @@ export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
       }
     }
     const r = await ctx.host.runCommand(a.command, ctx.signal, { cwd: a.cwd });
-    const out = truncateOutput(r.output);
+    const out = r.exitCode === 0 ? truncateOutput(r.output) : failureReport(r.output, ctx.host.root);
     const where = a.cwd && a.cwd !== "." ? ` (in ${a.cwd})` : "";
     const timeout = r.timedOut
       ? "\n[Timed out after 2 minutes and was stopped. Servers and watchers never finish; check your work with a build or tests instead.]"

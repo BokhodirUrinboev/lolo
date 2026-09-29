@@ -18,6 +18,16 @@ async function waitFor<T>(get: () => T | undefined, timeoutMs: number): Promise<
   }
 }
 
+/** The TS server needs a moment to index new files: poll until references across files show up. */
+async function pollRefs(host: VsCodeHost) {
+  const t0 = Date.now();
+  for (;;) {
+    const refs = (await host.references({ path: "src/price.ts", line: 1, column: 16 })) ?? [];
+    if (refs.some((r) => r.path === "src/use.ts") || Date.now() - t0 > 30_000) return refs;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 export async function run(): Promise<void> {
   const folder = vscode.workspace.workspaceFolders![0];
   const output = vscode.window.createOutputChannel("smoke");
@@ -47,6 +57,19 @@ export async function run(): Promise<void> {
   const after = await host.diagnostics(["src/a.ts"]);
   assert.strictEqual(after.filter((d) => d.severity === "error").length, 0, "errors should clear after fix");
   log("replace + diagnostics refresh ok");
+
+  // LSP references and rename across files (TypeScript language server).
+  assert.ok((await host.proposeWrite("src/price.ts", "export function calcTotal(xs: number[]) {\n  return xs.reduce((s, x) => s + x, 0);\n}\n", { isNew: true, reason: "create" })).applied);
+  assert.ok((await host.proposeWrite("src/use.ts", 'import { calcTotal } from "./price";\nexport const t = calcTotal([1, 2]);\n', { isNew: true, reason: "create" })).applied);
+  const refs = await pollRefs(host);
+  log(`references: ${JSON.stringify(refs)}`);
+  assert.ok(refs.some((r) => r.path === "src/use.ts" && r.line === 2), "expected a reference in src/use.ts line 2");
+  const renamed = await host.renameEdits({ path: "src/price.ts", line: 1, column: 16 }, "sumAll");
+  log(`renameEdits: ${JSON.stringify(renamed?.map((c) => c.path))}`);
+  assert.ok(renamed?.find((c) => c.path === "src/use.ts")?.content.includes("sumAll([1, 2])"), "rename should update the caller");
+  assert.ok((await host.proposeWrites(renamed!, "rename")).applied);
+  assert.ok((await host.readFile("src/use.ts")).includes('import { sumAll } from "./price";'));
+  log("LSP references + rename ok");
 
   const r = await host.runCommand("sh -c 'echo smoke-out; exit 3'");
   log(`runCommand: exit ${r.exitCode}, output ${JSON.stringify(r.output.slice(0, 200))}`);

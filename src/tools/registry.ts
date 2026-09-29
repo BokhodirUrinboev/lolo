@@ -1,10 +1,17 @@
 import { enabledEditTools } from "../edit/formats";
 import { answer, done } from "./control";
 import { getDiagnostics } from "./diagnostics";
-import { createFile, editFile, editLines, listDir, readFile, rewriteFile } from "./fileTools";
+import { createFile, editFile, editLines, listDir, readFile, readSymbol, rewriteFile } from "./fileTools";
+import { deleteFile, moveFile } from "./fileOps";
+import { gitBlame, gitDiff, gitLog } from "./gitTools";
+import { explore } from "./exploreTool";
+import { remember } from "./memoryTool";
 import { resolveWorkspacePath, writeForbidden } from "./paths";
+import { processLogs, startProcess } from "./processes";
 import { runCommand } from "./runCommand";
-import { search } from "./search";
+import { search, semanticSearch } from "./search";
+import { findDefinition, findReferences, renameSymbol } from "./symbolTools";
+import { fetchUrl, webSearchTool } from "./webTools";
 import type { ToolContext, ToolDef } from "./types";
 import { Schema, validate } from "./validate";
 
@@ -15,7 +22,14 @@ export type AgentMode = "ask" | "agent" | "plan";
  * pointless questions instead of working. Unclear messages get a clarifying reply
  * from the planner, and the loop itself asks the user only when a todo is stuck.
  */
-export const ALL_TOOLS: ToolDef[] = [readFile, search, listDir, getDiagnostics, editFile, rewriteFile, editLines, createFile, runCommand, done, answer];
+export const ALL_TOOLS: ToolDef[] = [
+  readFile, readSymbol, search, semanticSearch, listDir, getDiagnostics,
+  editFile, rewriteFile, editLines, createFile, runCommand,
+  findDefinition, findReferences, renameSymbol,
+  moveFile, deleteFile, gitDiff, gitLog, gitBlame,
+  startProcess, processLogs, webSearchTool, fetchUrl, remember, explore,
+  done, answer,
+];
 
 export interface Action {
   thought: string;
@@ -26,12 +40,23 @@ export interface Action {
 export type Checked = { ok: true; tool: ToolDef; args: any } | { ok: false; error: string };
 
 export class ToolRegistry {
-  private byName = new Map(ALL_TOOLS.map((t) => [t.name, t]));
+  /** Built-in tools plus this run's external (MCP) tools. */
+  readonly all: ToolDef[];
+  private byName: Map<string, ToolDef>;
 
-  /** Tools offered this step: mode decides read-only vs all; the edit-format policy decides which edit tools. */
+  constructor(external: ToolDef[] = []) {
+    this.all = [...ALL_TOOLS, ...external.filter((t) => !ALL_TOOLS.some((b) => b.name === t.name))];
+    this.byName = new Map(this.all.map((t) => [t.name, t]));
+  }
+
+  /** Tools offered this step: mode decides read-only vs all; the edit-format policy decides which edit tools; optional groups only when the todo needs them. */
   enabled(mode: AgentMode, ctx: ToolContext): ToolDef[] {
     const edit = new Set<string>(enabledEditTools(ctx.profile, ctx.edits));
-    return ALL_TOOLS.filter((t) => {
+    return this.all.filter((t) => {
+      if (t.group === "mcp") {
+        if (!ctx.mcpTools?.has(t.name)) return false;
+      } else if (t.group && !(t.group === "symbols" ? ctx.largeFiles : ctx.needs?.has(t.group))) return false;
+      if (t.available && !t.available(ctx)) return false;
       if (mode !== "agent" && (t.kind === "write" || t.kind === "exec")) return false;
       if (t.name === "done") return mode !== "ask";
       if (t.name === "answer") return mode === "ask";
@@ -144,9 +169,18 @@ export class ToolRegistry {
       .map((t) => {
         const props = t.params.properties ?? {};
         const req = new Set(t.params.required ?? []);
-        const sig = Object.entries(props).map(([k, s]) => `${k}${req.has(k) ? "" : "?"}: ${s.type}`).join(", ");
-        return `- ${t.name}(${sig}): ${t.description}`;
+        const sig = Object.entries(props).map(([k, s]) => `${k}${req.has(k) ? "" : "?"}: ${typeName(s)}`).join(", ");
+        // Built-in tools explain their arguments in the description; external ones may describe each argument.
+        const notes = Object.entries(props).filter(([, s]) => s.description).map(([k, s]) => `${k}: ${s.description}`);
+        return `- ${t.name}(${sig}): ${t.description}${notes.length ? ` (${notes.join("; ")})` : ""}`;
       })
       .join("\n");
   }
+}
+
+function typeName(s: Schema): string {
+  if (s.enum) return s.enum.map((e) => JSON.stringify(e)).join("|");
+  if (s.anyOf) return [...new Set(s.anyOf.map(typeName))].join("|");
+  if (s.type === "array") return `${s.items ? typeName(s.items) : "any"}[]`;
+  return s.type ?? "any";
 }

@@ -1,6 +1,9 @@
 import * as vscode from "vscode";
 import type { AgentEvent, RunOptions, RunResult } from "../agent/loop";
 import { listFiles } from "../context/repoMap";
+import { expandSlashCommand, listSlashCommands } from "../context/slashCommands";
+import type { McpHub } from "../mcp/hub";
+import { MEMORY_PATH } from "../tools/memoryTool";
 import { unifiedDiff } from "../edit/lineDiff";
 import type { Approval, ApprovalRequest, Host } from "../host/types";
 import type { FromWebview, Item, Mode, SessionInfo, ToWebview, Turn, ViewState } from "./protocol";
@@ -65,6 +68,8 @@ export interface ChatBackend {
   restore(checkpoint: string): Promise<void>;
   applyCode(code: string): Promise<void>;
   host(): Host | undefined;
+  /** Connected MCP servers of the active folder, if any are configured. */
+  mcp(): McpHub | undefined;
 }
 
 /**
@@ -152,7 +157,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
         else return this.checkSetup();
         return;
       case "send":
-        return this.send(m.text, m.mode, undefined, m.includeActiveFile ?? true);
+        return this.send(m.text, m.mode, undefined, m.includeActiveFile ?? true, m.images);
       case "runPlan": {
         const plan = this.turns.find((t) => t.id === m.turnId)?.items.find((i) => i.kind === "plan");
         if (plan?.kind === "plan") return this.send("Run the plan.", "agent", { goal: plan.goal, todos: plan.todos }, false);
@@ -163,6 +168,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       case "openDiff": {
         const a = this.approvals.get(m.id);
         if (a?.req.kind === "edit") await this.backend.openDiff(a.req.path, a.req.before, a.req.after);
+        if (a?.req.kind === "edits") for (const f of a.req.files) await this.backend.openDiff(f.path, f.before, f.after);
         return;
       }
       case "setAutoAccept":
@@ -215,6 +221,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       }
       case "mentionQuery":
         return this.post({ type: "mentionResults", items: await this.mentionItems(m.query) });
+      case "slashQuery": {
+        const host = this.backend.host();
+        const items = host ? await listSlashCommands(host, this.backend.mcp()).catch(() => []) : [];
+        return this.post({ type: "slashResults", items: items.map((c) => ({ cmd: `/${c.name}`, hint: c.description })) });
+      }
+      case "mcpStatus":
+        return this.showMcpStatus();
       case "pickFile": {
         const host = this.backend.host();
         if (!host) return;
@@ -226,6 +239,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       case "command": {
         const target = { restoreCheckpoint: "localAgent.restoreCheckpoint", inlineEdit: "localAgent.inlineEdit" } as const;
         if (m.id === "openSettings") await vscode.commands.executeCommand("workbench.action.openSettings", "localAgent");
+        else if (m.id === "openMemory") await this.openMemory();
         else await vscode.commands.executeCommand(target[m.id]);
         return;
       }
@@ -259,15 +273,49 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.postState();
   }
 
-  private async send(text: string, mode: Mode, plan: RunOptions["plan"], includeActiveFile: boolean) {
-    if (this.running || !text.trim()) return;
+  private async openMemory() {
+    const host = this.backend.host();
+    if (!host) return;
+    const uri = vscode.Uri.file(`${host.root}/${MEMORY_PATH}`);
+    if (!(await host.stat(MEMORY_PATH))) {
+      await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode("# Project memory\n\nFacts Agent Lolo keeps between conversations (edit freely).\n\n"));
+    }
+    await vscode.window.showTextDocument(uri);
+  }
+
+  private async showMcpStatus() {
+    const hub = this.backend.mcp();
+    if (!hub) {
+      const pick = await vscode.window.showInformationMessage("No MCP servers are configured. Add them to .agent/mcp.json or the localAgent.mcpServers setting.", "Open settings");
+      if (pick) await vscode.commands.executeCommand("workbench.action.openSettings", "localAgent.mcpServers");
+      return;
+    }
+    await hub.ready();
+    const lines = hub.status().map((s) => (s.ok ? `✓ ${s.name}: ${s.tools} tools` : `✗ ${s.name}: ${s.error}`));
+    void vscode.window.showInformationMessage(`MCP servers — ${lines.join(" · ")}`);
+  }
+
+  private async send(text: string, mode: Mode, plan: RunOptions["plan"], includeActiveFile: boolean, images?: string[]) {
+    if (this.running || (!text.trim() && !images?.length)) return;
+    if (!text.trim()) text = "What does this screenshot show? If it shows a problem in this project, explain it.";
+    // "/name args": a user command (.agent/commands) or MCP prompt, expanded before the agent sees it.
+    let prompt = text;
+    const host = this.backend.host();
+    if (!plan && text.startsWith("/") && host) {
+      const expanded = await expandSlashCommand(text, host, this.backend.mcp()).catch((e: Error) => `(${e.message})`);
+      if (expanded === undefined && /^\/[\w-]+(:[\w.-]+)?(\s|$)/.test(text.trim())) {
+        void vscode.window.showWarningMessage(`Unknown command ${text.trim().split(/\s/)[0]}. Commands are .md files in .agent/commands.`);
+        return;
+      }
+      if (expanded) prompt = expanded;
+    }
     if (!plan && mode !== "ask") {
       plan = pendingPlanFor(this.turns, text);
       if (plan) mode = "agent";
     }
     const conversation = conversationText(this.turns);
     const attached = includeActiveFile && this.activeFile ? [this.activeFile] : [];
-    const turn: Turn = { id: String(Date.now()), items: [{ kind: "user", text, mode, context: attached }], running: true };
+    const turn: Turn = { id: String(Date.now()), items: [{ kind: "user", text, mode, context: attached, images: images?.length || undefined }], running: true };
     this.session.turns.push(turn);
     if (this.session.turns.length > MAX_TURNS) this.session.turns.splice(0, this.session.turns.length - MAX_TURNS);
     if (!this.sessions.includes(this.session)) this.sessions.unshift(this.session);
@@ -277,7 +325,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     this.postState();
     try {
       await this.backend.run(
-        text,
+        prompt,
         mode,
         {
           signal: abort.signal,
@@ -301,7 +349,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
               this.post({ type: "planReview", todos, goal: plan?.kind === "plan" ? plan.goal : undefined });
             }),
         },
-        { conversation, plan, excludeActiveFile: !includeActiveFile },
+        { conversation, plan, excludeActiveFile: !includeActiveFile, images },
       );
     } catch (e) {
       turn.items.push({ kind: "error", text: (e as Error).message });
@@ -317,13 +365,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
   /** Edit/command permission, as a card in the conversation. */
   private approve(turn: Turn, req: ApprovalRequest): Promise<Approval> {
-    if (req.kind === "edit" && this.autoAccept) return Promise.resolve({ ok: true });
+    if (req.kind !== "command" && this.autoAccept) return Promise.resolve({ ok: true });
     if (req.kind === "command" && this.allowedCommands.has(commandPrefix(req.command))) return Promise.resolve({ ok: true });
     const id = `${turn.id}-${this.approvals.size}-${Date.now()}`;
     const item: Extract<Item, { kind: "approval" }> =
       req.kind === "edit"
         ? { kind: "approval", id, action: req.isNew ? "create" : "edit", target: req.path, detail: unifiedDiff(req.before, req.after).slice(0, 20_000), state: "pending" }
-        : { kind: "approval", id, action: "command", target: req.command, detail: req.reason, state: "pending" };
+        : req.kind === "edits"
+          ? {
+              kind: "approval",
+              id,
+              action: "edit",
+              target: req.files.length === 1 ? req.files[0].path : `${req.files.length} files (${req.reason})`,
+              // One section per file; "@@ path" renders like a hunk header.
+              detail: req.files.map((f) => `@@ ${f.path}\n${unifiedDiff(f.before, f.after)}`).join("\n").slice(0, 20_000),
+              state: "pending",
+            }
+          : { kind: "approval", id, action: "command", target: req.command, detail: req.reason, state: "pending" };
     turn.items.push(item);
     this.postState();
     return new Promise((resolve) => this.approvals.set(id, { item, req, resolve }));
@@ -336,8 +394,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     a.item.state = decision;
     a.item.feedback = feedback?.trim() || undefined;
     if (decision === "always") {
-      if (a.req.kind === "edit") this.autoAccept = true;
-      else this.allowedCommands.add(commandPrefix(a.req.command));
+      if (a.req.kind === "command") this.allowedCommands.add(commandPrefix(a.req.command));
+      else this.autoAccept = true;
     }
     a.resolve({ ok: decision !== "no", feedback: a.item.feedback });
     this.postState();
@@ -352,12 +410,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
   private async mentionItems(query: string) {
     const q = query.toLowerCase();
+    if (q.startsWith("mcp")) await this.backend.mcp()?.ready(); // resources are known once servers run
     const fixed = [
       { label: "problems", detail: "current errors and warnings" },
       { label: "git", detail: "uncommitted diff" },
       { label: "terminal", detail: "last terminal output" },
       { label: "symbol:", detail: "a class, function or method by name" },
-    ].filter((i) => i.label.startsWith(q));
+      { label: "web", detail: "let the agent search the web (localAgent.web.search)" },
+      { label: "docs:", detail: "README of an installed package, e.g. docs:express" },
+      ...(this.backend.mcp()?.resources() ?? []).map((r) => ({ label: `mcp:${r.server}/${r.name.replace(/\s+/g, "-")}`, detail: r.description ?? r.uri })),
+    ].filter((i) => i.label.toLowerCase().startsWith(q));
     const host = this.backend.host();
     if (!host) return fixed;
     if (!this.fileCache || Date.now() - this.fileCache.at > 30_000) this.fileCache = { at: Date.now(), files: await listFiles(host) };

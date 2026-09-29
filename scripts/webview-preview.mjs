@@ -78,6 +78,28 @@ const scenarios = {
       },
     ],
   },
+  // New tool kinds: image attachment, rename across files, MCP and web rows.
+  tools: {
+    sessionId: "3", title: "Rename calcTotal", sessions: [], activeFile: "src/pricing.js",
+    models: ["qwen3.5:9b"], model: "qwen3.5:9b", mode: "agent", running: true, autoAccept: false, context: { used: 3400, total: 65536 },
+    turns: [
+      {
+        id: String(t0 + 2),
+        running: true,
+        items: [
+          { kind: "user", text: "Rename calcTotal to computeTotal everywhere, and note it in the tracker", mode: "agent", context: ["src/pricing.js"], images: 1 },
+          { kind: "plan", goal: "Rename calcTotal to computeTotal", todos: ["Rename calcTotal to computeTotal everywhere", "Save a note with the notes server"], states: ["active", "pending"] },
+          { kind: "tool", tool: "find_references", target: "calcTotal", title: "find_references calcTotal: 5 in 3 files", ok: true, output: "src/pricing.js:1: function calcTotal(lines) {\nsrc/order.js:3: return `${order.id}: ${calcTotal(order.lines)}`;" },
+          { kind: "tool", tool: "mcp__notes__list_notes", target: undefined, title: "notes.list_notes: - upgrade vite to v8", ok: true, output: "- upgrade vite to v8" },
+          { kind: "tool", tool: "web_search", target: "vite 8 migration", title: "web_search \"vite 8 migration\": 6 results", ok: true, output: "1. Migration from v7 | Vite\n   https://vite.dev/guide/migration" },
+          {
+            kind: "approval", id: "r1", action: "edit", target: "3 files (rename calcTotal → computeTotal)", state: "pending",
+            detail: ["@@ src/pricing.js", "@@ -1,3 +1,3 @@", "-function calcTotal(lines) {", "+function computeTotal(lines) {", "@@ src/order.js", "@@ -1,2 +1,2 @@", "-const { calcTotal } = require(\"./pricing\");", "+const { computeTotal } = require(\"./pricing\");"].join("\n"),
+          },
+        ],
+      },
+    ],
+  },
 };
 
 // THEME=dark-modern: VS Code's default dark theme (used for README screenshots).

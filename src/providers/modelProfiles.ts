@@ -44,6 +44,8 @@ const QWEN_FIM: FimTokens = {
 
 const BUILTIN: ProfileOverride[] = [
   { match: "qwen2.5-coder", ctx: 32768, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 150, fim: QWEN_FIM, temperature: 0.2, maxOutput: 4096 },
+  // qwen2.5-coder fine-tuned on Lolo trajectories (scripts/finetune).
+  { match: "lolo-coder", ctx: 32768, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 150, fim: QWEN_FIM, temperature: 0.2, maxOutput: 4096 },
   { match: "qwen3-coder", ctx: 65536, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 300, fim: QWEN_FIM, temperature: 0.3, maxOutput: 8192 },
   // General (not coder) model: no FIM tokens, so autocomplete falls back to an installed coder model.
   // Hybrid attention (only 1 in 4 layers keeps a KV cache): 64k costs ~1.3 GB more than 32k.

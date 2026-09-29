@@ -3,7 +3,7 @@
 export type Mode = "ask" | "agent" | "plan";
 
 export type Item =
-  | { kind: "user"; text: string; mode: Mode; /** Files attached as context (e.g. the active editor). */ context?: string[] }
+  | { kind: "user"; text: string; mode: Mode; /** Files attached as context (e.g. the active editor). */ context?: string[]; /** Number of pasted images (not stored). */ images?: number }
   | { kind: "status"; text: string }
   | { kind: "plan"; goal?: string; todos: string[]; states: ("pending" | "active" | "done" | "failed")[] }
   | { kind: "thought"; text: string }
@@ -71,16 +71,18 @@ export type ToWebview =
   | { type: "streaming"; thought: string; answer?: string }
   | { type: "planReview"; todos: string[]; goal?: string }
   | { type: "mentionResults"; items: { label: string; detail?: string }[] }
+  /** User commands (.agent/commands, MCP prompts) for the "/" menu. */
+  | { type: "slashResults"; items: { cmd: string; hint: string }[] }
   | { type: "insertText"; text: string };
 
 export type FromWebview =
   | { type: "ready" }
-  | { type: "send"; text: string; mode: Mode; includeActiveFile?: boolean }
+  | { type: "send"; text: string; mode: Mode; includeActiveFile?: boolean; /** Pasted images, base64 without the data: prefix. */ images?: string[] }
   | { type: "openSession"; id: string }
   | { type: "deleteSession"; id: string }
   | { type: "pickFile" }
   | { type: "setup"; action: "retry" | "pull" | "settings" }
-  | { type: "command"; id: "restoreCheckpoint" | "openSettings" | "inlineEdit" }
+  | { type: "command"; id: "restoreCheckpoint" | "openSettings" | "inlineEdit" | "openMemory" }
   | { type: "cancel" }
   | { type: "newChat" }
   | { type: "setModel"; model: string }
@@ -94,4 +96,6 @@ export type FromWebview =
   | { type: "restore"; checkpoint: string }
   | { type: "applyCode"; code: string }
   | { type: "openFile"; path: string }
-  | { type: "mentionQuery"; query: string };
+  | { type: "mentionQuery"; query: string }
+  | { type: "slashQuery" }
+  | { type: "mcpStatus" };

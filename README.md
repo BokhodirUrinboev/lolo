@@ -45,9 +45,35 @@ Keys: `1` `2` `3`, arrows and Enter, `Esc`.
 
 **It's a conversation.** Follow-ups see the earlier messages ("now add tests", "why did you change that?", "go" after a plan). Greetings get a reply, questions get a read-only answer, and only real requests start editing. Past conversations are kept in the history menu.
 
+**Refactors by code, not by hand.** Renames go through the language server (or tree-sitter), so every definition, import and call changes in one reviewed step. The agent can also find references and definitions, move or delete files (imports of a moved file are updated for you), read git history, and start a dev server in the background to try it with `curl` (it is stopped when the task ends).
+
+**Web search, when you want it.** Off by default. Pick a provider in `localAgent.web.search` (your own SearXNG, Brave, Tavily or DuckDuckGo), then write `@web`, paste a URL, or ask for "the latest version". Every query and download is shown for approval, local network addresses are never fetched, and long pages are reduced to the parts that matter before they reach the model. `@docs:express` adds the README of the version you have installed.
+
+**MCP servers.** Servers from `.agent/mcp.json`, `.vscode/mcp.json` or `localAgent.mcpServers` (stdio or HTTP) are started for you. Their tools are offered only when a task is about them (or you write `@mcp:<server>`), because every extra tool confuses a small model; calls ask for approval unless the server marks the tool read-only. Resources become `@mcp:server/name` mentions and prompts become `/server:prompt` commands. `/mcp` shows their status.
+
+```json
+{ "mcpServers": { "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "${env:GITHUB_TOKEN}" } } } }
+```
+
+Agent Lolo can be an MCP server too: `node dist/cli.js --mcp-server --root .` gives other agents its repository map, forgiving edit tool and renames.
+
+**Remembers what you tell it.** "Remember that we use pnpm" saves the fact to `.agent/memory.md` (after you approve it), and every later conversation sees it. `/memory` opens the file.
+
+**Your own commands.** Each `.agent/commands/<name>.md` is a `/name` command; `$ARGUMENTS` is replaced by what you type after it.
+
+```markdown
+---
+description: Review a file for bugs
+---
+Review $ARGUMENTS for bugs and list them. Do not change code.
+```
+
+**Screenshots.** Paste an image into the chat to show a UI bug or an error dialog (needs a vision model such as `qwen3.5:9b`).
+
 **Also included:**
 
-- `@`-mentions: `@path/to/file`, `@folder/`, `@symbol:Name`, `@problems`, `@git`, `@terminal`
+- `@`-mentions: `@path/to/file`, `@folder/`, `@symbol:Name`, `@docs:package`, `@problems`, `@git`, `@terminal`, `@web`
+- Semantic code search ("where are passwords hashed?") with a local embedding model: set `localAgent.embeddingModel` to `nomic-embed-text` after `ollama pull nomic-embed-text`
 - `Ctrl+I` / `Cmd+I`: rewrite the selection from an instruction and review it as an inline diff (`Tab` accepts, `Esc` rejects)
 - Autocomplete (ghost text) using the model's fill-in-the-middle tokens
 - A context usage indicator, and a repository map (built with tree-sitter) so the model knows your code's structure
@@ -80,7 +106,7 @@ Without `verify:` lines, the agent picks a check from your project files (`.sln`
 
 ## Privacy
 
-Everything runs locally: your prompts and code go only to the model server you configure (by default Ollama on `localhost`). The extension sends no telemetry. Run logs are written to `.agent/trajectories` in your workspace (git-ignored automatically), so you can see exactly what the agent did.
+Everything runs locally: your prompts and code go only to the model server you configure (by default Ollama on `localhost`). The extension sends no telemetry. The only exceptions are the ones you turn on and approve one by one: web search queries and page downloads, and MCP servers you configure. Run logs are written to `.agent/trajectories` in your workspace (git-ignored automatically), so you can see exactly what the agent did.
 
 ## Language
 
@@ -97,6 +123,10 @@ You can write in any language, but small coder models understand English best. F
 | `localAgent.autoApproveEdits` | `false` | Apply edits without asking (a checkpoint is still taken) |
 | `localAgent.commandAllowlist` | build/test commands | Commands the agent may run without asking |
 | `localAgent.maxStepsPerTodo` | `15` | Step limit per plan item |
+| `localAgent.web.search` | `off` | `searxng`, `brave`, `tavily` or `duckduckgo`; keys via "Agent Lolo: Set Web Search API Key" |
+| `localAgent.web.searxngUrl` | | Your SearXNG instance, e.g. `http://localhost:8080` |
+| `localAgent.mcpServers` | `{}` | MCP servers (also read from `.agent/mcp.json` and `.vscode/mcp.json`) |
+| `localAgent.embeddingModel` | | e.g. `nomic-embed-text`: enables semantic search |
 | `localAgent.autocomplete.*` | enabled | `model`, `debounceMs`, `maxTokens` |
 
 ## Commands and keys
@@ -105,7 +135,7 @@ You can write in any language, but small coder models understand English best. F
 |---|---|
 | `Shift+Tab` (chat) | Switch mode |
 | `Esc` (chat) | Stop the running task |
-| `/` (chat) | Commands: `/new`, `/plan`, `/auto`, `/restore`, ... |
+| `/` (chat) | Commands: `/new`, `/plan`, `/auto`, `/restore`, `/mcp`, `/memory`, and your own |
 | `Ctrl+I` / `Cmd+I` | Edit the selection |
 | `Tab` / `Esc` (editor) | Accept / reject pending inline changes |
 | Agent Lolo: Restore Checkpoint | Restore the workspace to an earlier checkpoint |

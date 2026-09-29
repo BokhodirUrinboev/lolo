@@ -1,0 +1,1 @@
+{"task": "Implement ReverseWords(s) in words.go: reverse the order of the words (separated by any whitespace) and join them with single spaces, without leading or trailing spaces.", "check": "go test ./..."}

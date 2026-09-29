@@ -125,8 +125,8 @@ qwen2.5-coder native FIM token'larini qo'llaydi (`<|fim_prefix|>…<|fim_suffix|
 
 ### 7. Inline Edit (Ctrl+I)
 
-Selection va ko'rsatma yoziladi, model tanlangan qism uchun whole-block rewrite qiladi. Natijantext tor va format sodda.
- joyida inline diff bo'lib chiqadi, Tab bilan qabul qilinadi, Esc bilan rad etiladi. Bu 7B model uchun eng ishonchli rejim, chunki co
+Selection va ko'rsatma yoziladi, model tanlangan qism uchun whole-block rewrite qiladi. Natija joyida inline diff bo'lib chiqadi, Tab bilan qabul qilinadi, Esc bilan rad etiladi. Bu 7B model uchun eng ishonchli rejim, chunki context tor va format sodda.
+
 ### 8. UI (Webview)
 
 - Chat panel: markdown, kod bloklari "Apply" tugmasi bilan, streaming.
@@ -156,4 +156,60 @@ Kichik model bilan ishlaganda bu modul majburiy: prompt yoki format o'zgarishi y
 - Autocomplete p50 latency GPU'da < 500ms. CPU'da 1.5B model bilan ~1s.
 - Boshqa modelga o'tish uchun faqat yangi profile qo'shish kifoya, kod o'zgarmaydi.
 
-Keyingi javobda shu rejaning kodini yozishni boshlashim mumkin: yadrodan (`providers` + `tools` + `edit` + `agent/loop`) ishlaydigan skelet, keyin UI va FIM.
+## Keyingi bosqich (0.4+)
+
+0.3 bilan asosiy reja bajarildi. Endi agent imkoniyatlarini kengaytiramiz. Asosiy qoida o'zgarmaydi: kichik model uchun **har bir yangi tool bu yangi xato ehtimoli**. Har tool `anyOf` schema'ga yangi branch qo'shadi, 7B model esa ro'yxat qancha uzun bo'lsa, tool'ni shuncha ko'p adashtiradi. Shuning uchun har imkoniyat:
+
+- default holatda o'chiq yoki faqat kerak bo'lganda yoqiladi;
+- eval'da o'lchanadi: validity va pass % tushmasligi kerak;
+- tashqariga chiqadigan har qanday so'rov (internet, MCP) permission kartasidan o'tadi.
+
+### 11. Tooling'ni kuchaytirish
+
+> **Holat (0.4.0): bajarildi.** Bitta farq bor: tool guruhlarini planner emas, kod tanlaydi (`agent/needs.ts`, kalit so'zlar orqali). Planner'ning `needs` maydoni 7B model uchun yana bitta xato manbai bo'lardi. Eval: 6 vazifada pass 83% → 92%, o'rtacha qadam 7.6 → 4.2 (rename 11–18 qadam o'rniga 2 qadamda).
+
+- **Dinamik tool to'plami:** har todo uchun faqat kerakli tool'lar yoqiladi. Planner todo'ga `needs` (masalan `edit`, `run`, `web`, `mcp:db`) belgilaydi, kod shunga qarab `anyOf` branch'larini tanlaydi. Maqsad: bir step'da ≤ 8 tool.
+- **LSP tool'lari** (Host orqali, core `vscode`'ni import qilmaydi): `find_references`, `go_to_definition`, `rename_symbol`. Ko'p faylli rename'ni model qo'lda qilgandan ko'ra LSP bilan qilish ancha ishonchli. `NodeHost`'da tree-sitter fallback ishlatiladi.
+- **`read_symbol`:** fayl nomi va symbol bo'yicha faqat o'sha funksiya yoki class o'qiladi (tree-sitter). Katta fayllarda context tejaladi.
+- **Fayl amallari:** `move_file`, `delete_file` (checkpoint bor, lekin baribir tasdiq so'raladi).
+- **Git (read-only):** `git_diff`, `git_log`, `git_blame`. Kerak bo'lsa commit message yozish va o'zgarishlarni review qilish buyruqlari.
+- **Test natijalarini parse qilish:** `dotnet test`, jest/vitest, pytest va `cargo test` output'idan yiqilgan testlar `fayl:qator + xabar` ko'rinishida ajratib olinadi. Repair'ga xom log emas, shu ro'yxat beriladi.
+- **Background jarayonlar:** hozir server komandalari rad etiladi. Buning o'rniga `start_process` qo'shiladi: jarayon fonda ishga tushadi, port ochilishi kutiladi, log'lar o'qiladi, run oxirida esa jarayon albatta o'ldiriladi. Shunda "API'ni ishga tushirib curl bilan tekshir" kabi vazifalar ham bajariladi.
+- **Hooks:** `.agent/rules.md` ichida `after-edit: dotnet format` va `before-done: npm run lint` kabi qatorlar. Formatlashni model emas, kod qiladi.
+- **Semantic search:** Ollama embedding modeli (`nomic-embed-text`) bilan kod bo'laklari indekslanadi (`.agent/index`). `search` tool'iga `semantic: true` rejimi qo'shiladi. Repo map'ni to'ldiradi, o'rnini bosmaydi.
+
+### 12. MCP (Model Context Protocol)
+
+> **Holat (0.4.0): bajarildi**, Lolo'ni MCP server qilish ham (`cli --mcp-server`). VS Code'ning `vscode.lm.tools` API'si 1.93 engine'da yo'q, shuning uchun uning o'rniga `.vscode/mcp.json` va `mcp.servers` sozlamasi o'qiladi.
+
+- **MCP client:** `@modelcontextprotocol/sdk` bilan stdio va streamable HTTP transport'lari. Konfiguratsiya `.agent/mcp.json` va `localAgent.mcpServers` sozlamasida bo'ladi. VS Code'ning o'zida sozlangan MCP serverlar ham ko'rinadi (`vscode.lm.tools`, `VsCodeHost` orqali).
+- **Tool mapping:** MCP tool'ning `inputSchema`'si `anyOf` branch'iga aylanadi, nomi `mcp__<server>__<tool>` ko'rinishida bo'ladi. Schema Ollama `format` tushunadigan subset'ga keltiriladi: `$ref` ochiladi, qo'llab-quvvatlanmaydigan keyword'lar olib tashlanadi. Tavsif qisqartiriladi, chunki uzun tavsif prompt'ni shishiradi.
+- **Tanlash:** MCP serverlarda o'nlab tool bo'lishi mumkin. Foydalanuvchi har server uchun qaysi tool'lar yoqilishini belgilaydi (chat'dagi "Tools" menyusi). Qolganini dinamik to'plam (11-bo'lim) filtrlaydi: todo matniga eng mos top-k tool olinadi.
+- **Permission:** MCP tool'lar default holatda tasdiq so'raydi. `readOnlyHint` annotatsiyasi bor tool'lar read tool kabi avtomatik o'tadi. "Don't ask again" tool bo'yicha ishlaydi.
+- **Resources va prompts:** MCP resource'lar `@mcp:<server>/<resource>` mention bo'ladi, MCP prompt'lar esa `/` buyruqlari ro'yxatida chiqadi.
+- **Natija hajmi:** katta output kesiladi va budget'ga sig'diriladi, rasm yoki binary kontent matnli izoh bilan almashtiriladi.
+- **Keyinroq:** Agent Lolo'ning o'zini MCP server qilib ochish (`edit` engine va repo map'ni boshqa agentlar ham ishlatishi uchun).
+
+### 13. Web search va fetch
+
+> **Holat (0.4.0): bajarildi.** Qo'shimcha provider sifatida DuckDuckGo qo'shildi (kalitsiz). `@docs` avval lokal o'rnatilgan paketdan o'qiydi, registry'ga (npm/PyPI) faqat web yoqilgan bo'lsa murojaat qiladi.
+
+- **`web_search`:** provider tanlanadi. Default va local-first varianti SearXNG (self-hosted), qo'shimcha variantlar Brave Search API va Tavily (API key bilan). Default holatda o'chiq. Yoqilganda ham har query tasdiq kartasida ko'rsatiladi, chunki ma'lumot mashinadan tashqariga chiqadi.
+- **`fetch_url`:** faqat http(s). Sahifa readability → markdown'ga o'tkaziladi va `.agent/cache`'da saqlanadi. Lokal/private IP manzillar bloklanadi.
+- **Kichik model uchun siqish:** butun sahifa context'ga tiqilmaydi. Alohida model chaqiruvi sahifadan faqat savolga tegishli qismni ajratib beradi ("extract, don't summarize": kod misollari so'zma-so'z qoladi).
+- **Qachon qidiradi:** foydalanuvchi `@web` yozganda yoki planner `needs: web` qo'yganda. Model o'zi xohlagan payt qidirmaydi, aks holda 7B model ish o'rniga qidiruvga berilib ketadi (xuddi `ask_user` bilan bo'lgani kabi).
+- **`@docs`:** o'rnatilgan paket versiyasiga mos hujjatlar (masalan NuGet yoki npm paketining README'si yoki docs sahifasi) mention sifatida qo'shiladi. Bu Context7 kabi MCP server orqali ham qilinishi mumkin.
+
+### 14. Boshqa yo'nalishlar
+
+> **Holat (0.4.0):** explore, memory, custom buyruqlar, rasm kiritish va eval'ni 14 vazifaga (JS, Python, C#, Go) kengaytirish bajarildi. Fine-tune pipeline'i tayyor (`scripts/finetune`), lekin o'qitish hali ishga tushirilmagan: GPU'da soatlab vaqt va torch/unsloth o'rnatish kerak. Windows/macOS'da test qilish va Open VSX'ga chiqarish (`npm run publish:ovsx`, token kerak) qo'lda qilinadi.
+
+- **Explore sub-run:** read-only tool'lar bilan alohida qisqa run ishlaydi va asosiy run'ga faqat xulosa qaytaradi ("qaysi fayllar, qaysi funksiyalar"). Asosiy context toza qoladi. Kichik model uchun bu parallel agentlardan foydaliroq.
+- **Uzoq muddatli xotira:** `.agent/memory.md`. Agent loyiha haqidagi faktlarni taklif qiladi, foydalanuvchi tasdiqlagani saqlanadi va prompt'ga kiradi (rules'dan keyin, o'zgarmas qism sifatida, KV cache buzilmaydi).
+- **Custom slash buyruqlar:** `.agent/commands/*.md` fayllari `/nom` bo'lib chiqadi (prompt shablon + `$ARGUMENTS`).
+- **Rasm kiritish:** multimodal modellar (qwen3.5, qwen2.5-vl) uchun screenshot'ni chat'ga paste qilish ("shu UI xatosini tuzat").
+- **Eval'ni kengaytirish:** 6 vazifadan 30–50 taga. Real .NET vazifalari, ko'p faylli refactor, MCP (mock server) va web (yozib olingan javoblar) vazifalari. CI'da nightly run.
+- **Fine-tune:** trajectory'lardan LoRA dataset (`eval.js export`) yig'iladi, `qwen2.5-coder:7b` Lolo tool formatiga moslab o'qitiladi va eval'da taqqoslanadi.
+- **Platformalar:** Windows va macOS'da to'liq test, Open VSX'ga nashr.
+
+**Tartib:** 11 (dinamik tool to'plami, test parse, LSP) → 13 (web, eng ko'p so'raladigan narsa) → 12 (MCP) → 14. Har bosqich oxirida eval natijasi CHANGELOG'ga yoziladi.

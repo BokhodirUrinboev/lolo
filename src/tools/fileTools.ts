@@ -1,3 +1,4 @@
+import { fileSymbols, languageFor } from "../context/treeSitter";
 import { applyLineRange, editToolFor, EditTool, mergeLazyRewrite } from "../edit/formats";
 import { fuzzyApply } from "../edit/fuzzyApply";
 import { checkEditSyntax } from "../edit/syntaxGuard";
@@ -57,7 +58,13 @@ export const readFile: ToolDef<{ path: string; start_line?: number; end_line?: n
   },
   check: (a, ctx) => mustBeFile(a.path, ctx),
   async run(a, ctx) {
-    const lines = toLf(await ctx.host.readFile(a.path)).split("\n");
+    const raw = await ctx.host.readFile(a.path);
+    // An empty file shown as just the edit hint made models copy the hint into `search`.
+    if (!raw.trim()) {
+      const how = ctx.readOnly ? "" : ` To fill it, use rewrite_file with the complete content.`;
+      return ok(`${a.path} is empty (no content yet).${how}`, `read_file ${a.path}: empty`);
+    }
+    const lines = toLf(raw).split("\n");
     const start = Math.min(a.start_line ?? 1, lines.length);
     const end = Math.min(a.end_line ?? lines.length, lines.length, start + MAX_READ_LINES - 1);
     const slice = lines.slice(start - 1, end);
@@ -66,8 +73,51 @@ export const readFile: ToolDef<{ path: string; start_line?: number; end_line?: n
     const range = start === 1 && end === lines.length ? `${lines.length} lines` : `lines ${start}-${end} of ${lines.length}`;
     const more = end < lines.length ? `\n[${lines.length - end} more lines; read again with start_line=${end + 1}]` : "";
     const symbols = symbolSummary(slice.join("\n"));
+    const big = lines.length > ctx.profile.wholeFileMaxLines && !!languageFor(a.path);
+    if (big) ctx.largeFiles = true;
+    const tip = big ? `\n[Big file: read_symbol reads just one function or class by name.]` : "";
     const hint = ctx.readOnly ? "" : `\n[To change this file use ${EDIT_HINT[editToolFor(ctx.profile, ctx.edits, a.path, lines.length)]}.]`;
-    return ok(`${a.path} (${range}):\n${body}${more}${hint}`, `read_file ${a.path}: ${range}${symbols ? `; ${symbols}` : ""}`);
+    return ok(`${a.path} (${range}):\n${body}${more}${hint}${tip}`, `read_file ${a.path}: ${range}${symbols ? `; ${symbols}` : ""}`);
+  },
+};
+
+export const readSymbol: ToolDef<{ path: string; symbol: string }> = {
+  name: "read_symbol",
+  kind: "read",
+  group: "symbols",
+  description: "Read only one function, method or class of a big file by name (`symbol`, or `Class.method`). Small files are returned whole.",
+  params: { type: "object", properties: { path: { type: "string" }, symbol: { type: "string", minLength: 1 } }, required: ["path", "symbol"] },
+  async check(a, ctx) {
+    const bad = await mustBeFile(a.path, ctx);
+    if (bad) return bad;
+    return languageFor(a.path) ? undefined : `read_symbol does not support ${a.path}. Use read_file with start_line/end_line.`;
+  },
+  async run(a, ctx) {
+    const raw = await ctx.host.readFile(a.path);
+    // A partial view of a small file made the model rewrite_file it and drop the unseen parts (module.exports).
+    if (toLf(raw).split("\n").length <= ctx.profile.wholeFileMaxLines) return readFile.run({ path: a.path }, ctx);
+    const defs = (await fileSymbols(a.path, raw))?.defs ?? [];
+    const parts = a.symbol.split(/[.:#]+/).filter(Boolean);
+    const name = parts[parts.length - 1] ?? a.symbol;
+    const parent = parts[parts.length - 2];
+    const found = defs.filter(
+      (d) => d.name === name && (!parent || defs.some((p) => p !== d && p.name === parent && p.line <= d.line && p.endLine >= d.endLine)),
+    );
+    if (!found.length) {
+      const names = [...new Set(defs.map((d) => d.name))].slice(0, 25).join(", ");
+      return fail(`No symbol "${a.symbol}" in ${a.path}.${names ? ` Symbols here: ${names}.` : " No symbols found; use read_file."}`, `read_symbol ${a.path}#${a.symbol}: not found`);
+    }
+    const lines = toLf(raw).split("\n");
+    const numbered = ctx.edits.isLineRange(a.path);
+    const blocks = found.slice(0, 3).map((d) => {
+      const end = Math.min(d.endLine, d.line + MAX_READ_LINES - 1);
+      const slice = lines.slice(d.line - 1, end);
+      const cut = end < d.endLine ? `\n[${d.endLine - end} more lines; use read_file with start_line=${end + 1}]` : "";
+      return `${a.path} lines ${d.line}-${d.endLine} (${d.name}):\n${numbered ? numberLines(slice, d.line) : slice.join("\n")}${cut}`;
+    });
+    const extra = found.length > 3 ? `\n[${found.length - 3} more matches; qualify the name as Class.method]` : "";
+    const hint = ctx.readOnly ? "" : `\n[To change this file use ${EDIT_HINT[editToolFor(ctx.profile, ctx.edits, a.path, lines.length)]}.]`;
+    return ok(blocks.join("\n\n") + extra + hint, `read_symbol ${a.path}#${a.symbol}: lines ${found[0].line}-${found[0].endLine}`);
   },
 };
 
@@ -92,7 +142,8 @@ export const listDir: ToolDef<{ path?: string }> = {
   },
 };
 
-async function write(ctx: ToolContext, path: string, content: string, isNew: boolean, reason: string, note = ""): Promise<ToolResult> {
+/** `fragment`: the text the model wrote for this edit (to spot a reply cut off by an unescaped quote). */
+async function write(ctx: ToolContext, path: string, content: string, isNew: boolean, reason: string, note = "", fragment = content): Promise<ToolResult> {
   const before = isNew ? undefined : await ctx.host.readFile(path);
   if (before !== undefined) content = matchFileEnding(before, content);
   if (content === before) {
@@ -101,7 +152,7 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
       noop: true,
     };
   }
-  const broken = await checkEditSyntax(path, before, content);
+  const broken = await checkEditSyntax(path, before, content, fragment);
   if (broken) {
     ctx.edits.recordFailure(path);
     return fail(broken, `${reason}: rejected (syntax error)`);
@@ -135,7 +186,7 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
     const r = fuzzyApply(original, a.search, a.replace, { all: a.all });
     if (r.ok) {
       const note = r.strategy === "exact" ? "" : ` (matched ${r.strategy} at line ${r.startLine}, score ${r.score})`;
-      return write(ctx, a.path, r.content, false, `edit ${a.path}`, note);
+      return write(ctx, a.path, r.content, false, `edit ${a.path}`, note, a.replace);
     }
     const switched = ctx.edits.recordFailure(a.path);
     let out = `Edit failed: ${r.reason}`;
@@ -188,7 +239,7 @@ export const editLines: ToolDef<{ path: string; start_line: number; end_line: nu
   async run(a, ctx) {
     const r = applyLineRange(await ctx.host.readFile(a.path), a.start_line, a.end_line, a.content);
     if (!r.ok) return fail(`edit_lines failed: ${r.reason}`);
-    return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${a.start_line}-${a.end_line}`);
+    return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${a.start_line}-${a.end_line}`, "", a.content);
   },
 };
 
@@ -198,7 +249,12 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
   description: "Create a new file (parent folders are created). Fails if the file exists.",
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
-    return (await ctx.host.stat(a.path)) ? `"${a.path}" already exists. Use edit to change it.` : undefined;
+    if (await ctx.host.stat(a.path)) return `"${a.path}" already exists. Use edit to change it.`;
+    // An empty file is a wasted step (and then an edit on nothing); only markers may be empty.
+    if (!a.content.trim() && !/(^|\/)(__init__\.py|\.gitkeep|\.keep|py\.typed)$/.test(a.path)) {
+      return `content is empty. Create ${a.path} with its complete content in this call.`;
+    }
+    return undefined;
   },
   run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`),
 };

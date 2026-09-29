@@ -1,0 +1,1 @@
+{"task": "src/order.js and src/invoice.js both compute a 12% tax inline. Move that into a function computeTax(amount) exported from a new file src/tax.js and use it in both files.", "check": "! grep -q '0.12' src/order.js src/invoice.js && node --test"}

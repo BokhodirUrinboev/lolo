@@ -94,3 +94,12 @@ describe("resolveProfile", () => {
     expect(resolveProfile("qwen3.5:9b", [{ match: "qwen3.5", ctx: 131072 }]).ctx).toBe(131072);
   });
 });
+
+describe("mergeLazyRewrite: placeholder-like comments in complete rewrites", () => {
+  it("keeps a full rewrite whose comment only looks like a placeholder", () => {
+    const orig = 'const test = require("node:test");\nconst { Cart } = require("../src/cart");\n\ntest("total", () => {\n  const c = new Cart();\n  c.add("apple", 2, 3);\n});\n';
+    const proposed = "const test = require('node:test');\nconst { Cart } = require('../src/cart');\n\n// Existing tests...\ntest('total', () => {\n  const c = new Cart();\n  c.add('apple', 2, 3);\n});\n\ntest('discount', () => {});\n";
+    const r = mergeLazyRewrite(orig, proposed);
+    expect(r).toEqual({ ok: true, content: proposed, filled: 0 });
+  });
+});

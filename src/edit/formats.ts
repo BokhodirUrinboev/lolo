@@ -100,6 +100,10 @@ export function mergeLazyRewrite(original: string, proposed: string): MergeResul
   const origNorm = orig.map(normalizeWs);
 
   if (!prop.some((l) => isLazyPlaceholder(l, origSet))) return { ok: true, content: proposed, filled: 0 };
+  // The "placeholder" is just a comment when the rewrite already contains (nearly) every
+  // original line, e.g. "// Existing tests..." above the tests rewritten with other quotes.
+  // Filling it would duplicate code and break the file.
+  if (coverage(orig, prop) >= 0.9) return { ok: true, content: proposed, filled: 0 };
 
   const out: string[] = [];
   let cursor = 0; // next original line not yet consumed
@@ -141,6 +145,14 @@ export function mergeLazyRewrite(original: string, proposed: string): MergeResul
     sinceFill = out.length;
   }
   return { ok: true, content: fromLf(out.join("\n"), eol), filled };
+}
+
+/** Share of the original's non-blank lines that appear in `proposed` (ignoring whitespace and quote style). */
+function coverage(orig: string[], proposed: string[]): number {
+  const norm = (l: string) => normalizeWs(l).replace(/["'`]/g, '"');
+  const have = new Set(proposed.map(norm));
+  const lines = orig.filter((l) => l.trim());
+  return lines.length ? lines.filter((l) => have.has(norm(l))).length / lines.length : 0;
 }
 
 function fail(anchor: string): MergeResult {

@@ -2,7 +2,7 @@
   "name": "agent-lolo",
   "displayName": "Agent Lolo",
   "description": "Local-first AI coding agent for small local models (Ollama, llama.cpp, LM Studio): chat, plan & edit with diff approvals, checkpoints, inline edit, autocomplete. Nothing leaves your machine.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "nodirbek",
   "license": "MIT",
   "engines": {
@@ -48,6 +48,11 @@
       {
         "command": "localAgent.restoreCheckpoint",
         "title": "Restore Checkpoint",
+        "category": "Agent Lolo"
+      },
+      {
+        "command": "localAgent.setWebApiKey",
+        "title": "Set Web Search API Key",
         "category": "Agent Lolo"
       },
       {
@@ -123,6 +128,40 @@
             "pwd"
           ],
           "description": "Command prefixes run_command may execute without asking."
+        },
+        "localAgent.embeddingModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Embedding model for semantic code search (e.g. `nomic-embed-text`: `ollama pull nomic-embed-text`). Empty: off. The index is kept in `.agent/index`."
+        },
+        "localAgent.web.search": {
+          "type": "string",
+          "enum": [
+            "off",
+            "searxng",
+            "brave",
+            "tavily",
+            "duckduckgo"
+          ],
+          "enumDescriptions": [
+            "No web access (default)",
+            "Your own SearXNG instance (local-first; set localAgent.web.searxngUrl)",
+            "Brave Search API (API key: \"Agent Lolo: Set Web Search API Key\")",
+            "Tavily API (API key: \"Agent Lolo: Set Web Search API Key\")",
+            "DuckDuckGo's HTML page (no key; may rate-limit)"
+          ],
+          "default": "off",
+          "markdownDescription": "Lets the agent search the web and read pages when you ask for it (`@web`, a URL, \"latest version\"). Every query and page download is shown for approval first."
+        },
+        "localAgent.web.searxngUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "SearXNG base URL, e.g. `http://localhost:8080`. The instance must allow the `json` output format."
+        },
+        "localAgent.mcpServers": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "MCP servers, e.g. `{\"github\": {\"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-github\"], \"env\": {\"GITHUB_TOKEN\": \"${env:GITHUB_TOKEN}\"}}}` or `{\"docs\": {\"url\": \"https://example.com/mcp\"}}`. Also read from `.agent/mcp.json` and `.vscode/mcp.json`. Optional `tools: [...]` limits which tools are offered. Tools are offered only when a task is about them (or you write `@mcp:<server>`), and calls ask for approval unless the server marks the tool read-only."
         },
         "localAgent.maxStepsPerTodo": {
           "type": "number",
@@ -210,7 +249,8 @@
     "test:vscode": "npm run build && node scripts/vscode-smoke.mjs",
     "agent": "node dist/cli.js",
     "eval": "node dist/eval.js",
-    "package": "node esbuild.mjs --production && vite build --logLevel warn && vsce package --no-dependencies"
+    "package": "node esbuild.mjs --production && vite build --logLevel warn && npx --yes @vscode/vsce package --no-dependencies",
+    "publish:ovsx": "npx --yes ovsx publish agent-lolo-$npm_package_version.vsix"
   },
   "devDependencies": {
     "@types/dompurify": "^3.0.5",
@@ -231,6 +271,7 @@
     "vitest": "^5.0.1"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@vscode/ripgrep": "^1.18.0",
     "@vscode/tree-sitter-wasm": "^0.3.1"
   },

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import { CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, Host } from "./types";
+import { CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, FileChange, Host } from "./types";
 
 export interface NodeHostOptions {
   /** Apply writes without review (headless default; the run checkpoint still protects). */
@@ -57,6 +57,31 @@ export class NodeHost implements Host {
 
   async diagnostics(): Promise<Diagnostic[]> {
     return [];
+  }
+
+  async proposeWrites(changes: FileChange[], reason: string) {
+    const list = changes.map((c) => c.path).join(", ");
+    if (!this.opts.autoApprove && !(await this.confirm(`Apply ${reason} (${list})?`))) return { applied: false };
+    for (const c of changes) {
+      const before = await this.readFile(c.path).catch(() => undefined);
+      await mkdir(path.dirname(this.abs(c.path)), { recursive: true });
+      await writeFile(this.abs(c.path), c.content);
+      this.opts.onWrite?.(c.path, before, c.content);
+    }
+    return { applied: true };
+  }
+
+  async moveFile(from: string, to: string) {
+    if (!this.opts.autoApprove && !(await this.confirm(`Move ${from} to ${to}?`))) return { applied: false };
+    await mkdir(path.dirname(this.abs(to)), { recursive: true });
+    await rename(this.abs(from), this.abs(to));
+    return { applied: true };
+  }
+
+  async deleteFile(p: string) {
+    if (!this.opts.autoApprove && !(await this.confirm(`Delete ${p}?`))) return { applied: false };
+    await rm(this.abs(p), { recursive: true });
+    return { applied: true };
   }
 
   runCommand(command: string, signal?: AbortSignal, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<CommandResult> {

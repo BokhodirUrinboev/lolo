@@ -1,0 +1,1 @@
+{"task": "restock(inv, sku, qty) in src/inventory.js lowers the stock instead of raising it. Fix it.", "check": "node --test"}

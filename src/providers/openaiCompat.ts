@@ -12,7 +12,12 @@ export class OpenAICompatProvider implements LLMProvider {
   async chat(req: ChatRequest): Promise<ChatResponse> {
     const body: Record<string, unknown> = {
       model: this.profile.id,
-      messages: req.messages,
+      // Images use the content-parts form; plain messages stay strings.
+      messages: req.messages.map((m) =>
+        m.images?.length
+          ? { role: m.role, content: [{ type: "text", text: m.content }, ...m.images.map((b64) => ({ type: "image_url", image_url: { url: `data:${imageMime(b64)};base64,${b64}` } }))] }
+          : { role: m.role, content: m.content },
+      ),
       temperature: req.temperature ?? this.profile.temperature,
       max_tokens: req.maxTokens ?? this.profile.maxOutput,
       stream: true,
@@ -65,6 +70,15 @@ export class OpenAICompatProvider implements LLMProvider {
     return out;
   }
 
+  async embed(texts: string[], model: string, signal?: AbortSignal): Promise<number[][]> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    const res = await fetch(this.baseUrl.replace(/\/$/, "") + "/embeddings", { method: "POST", headers, body: JSON.stringify({ model, input: texts }), signal });
+    if (!res.ok) throw new ProviderError(`/embeddings: HTTP ${res.status} ${await res.text()}`, res.status);
+    const data = (await res.json()) as { data: { index: number; embedding: number[] }[] };
+    return data.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async *sse(path: string, body: object, signal?: AbortSignal): AsyncGenerator<any> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -78,4 +92,8 @@ export class OpenAICompatProvider implements LLMProvider {
       yield JSON.parse(payload);
     }
   }
+}
+
+function imageMime(b64: string): string {
+  return b64.startsWith("iVBOR") ? "image/png" : b64.startsWith("/9j/") ? "image/jpeg" : b64.startsWith("R0lG") ? "image/gif" : b64.startsWith("UklG") ? "image/webp" : "image/png";
 }
