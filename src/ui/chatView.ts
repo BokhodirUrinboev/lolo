@@ -90,7 +90,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   private pendingAnswer?: (text: string | null) => void;
   private approvals = new Map<string, { item: Extract<Item, { kind: "approval" }>; req: ApprovalRequest; resolve: (a: Approval) => void }>();
   /** Session permissions (reset by New chat), like Claude Code's "don't ask again". */
-  private autoAccept = false;
+  private autoAccept = vscode.workspace.getConfiguration("localAgent").get("autoRunCommands", false);
+  /** Commands run without asking too ("Run everything" mode). The command policy still blocks dangerous ones. */
+  private autoRun = vscode.workspace.getConfiguration("localAgent").get("autoRunCommands", false);
   private allowedCommands = new Set<string>();
   private postTimer?: NodeJS.Timeout;
   private fileCache?: { at: number; files: string[] };
@@ -173,6 +175,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       }
       case "setAutoAccept":
         this.autoAccept = m.on;
+        return this.postState();
+      case "setAutoRun":
+        this.autoRun = m.on;
         return this.postState();
       case "cancel":
         return this.cancel();
@@ -267,7 +272,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
   private switchTo(s: Session) {
     this.session = s;
-    this.autoAccept = false;
     this.allowedCommands.clear();
     void this.ctx.workspaceState.update(CURRENT_KEY, s.id);
     this.postState();
@@ -366,7 +370,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
   /** Edit/command permission, as a card in the conversation. */
   private approve(turn: Turn, req: ApprovalRequest): Promise<Approval> {
     if (req.kind !== "command" && this.autoAccept) return Promise.resolve({ ok: true });
-    if (req.kind === "command" && this.allowedCommands.has(commandPrefix(req.command))) return Promise.resolve({ ok: true });
+    if (req.kind === "command" && (this.autoRun || this.allowedCommands.has(commandPrefix(req.command)))) return Promise.resolve({ ok: true });
     const id = `${turn.id}-${this.approvals.size}-${Date.now()}`;
     const item: Extract<Item, { kind: "approval" }> =
       req.kind === "edit"
@@ -454,6 +458,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       mode: this.mode,
       running: !!this.running,
       autoAccept: this.autoAccept,
+      autoRun: this.autoRun,
       context: { used: this.session.contextUsed ?? 0, total: this.backend.contextWindow() },
     };
   }

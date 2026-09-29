@@ -3,7 +3,7 @@ import { collectContext } from "../context/collectors";
 import { buildRepoMap } from "../context/repoMap";
 import { environmentInfo } from "../context/environment";
 import { expandMentions } from "../context/mentions";
-import { detectChecks } from "../context/projectChecks";
+import { detectChecks, nestedProjectProblem } from "../context/projectChecks";
 import { loadRules, Rules } from "../context/rules";
 import { listFiles } from "../context/repoMap";
 import { SemanticIndex } from "../context/semanticIndex";
@@ -113,6 +113,17 @@ export function partialJsonString(json: string, field: string): string | undefin
   return m[1].replace(/\\(u[0-9a-fA-F]{4}|.)/g, (_, e: string) =>
     e[0] === "u" ? String.fromCharCode(parseInt(e.slice(1), 16)) : e === "n" ? "\n" : e === "t" ? "\t" : e,
   ).replace(/\\$/, "");
+}
+
+/** Whether `todo` asks to run exactly `command` (named in backticks) and nothing else. */
+export function commandTodo(todo: string, command: string): boolean {
+  const named = [...todo.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
+  if (named.length !== 1) return false;
+  const norm = (c: string) => c.replace(/\s+/g, " ").trim();
+  if (norm(named[0]) !== norm(command)) return false;
+  // "Run `x` to create the project" is the whole todo; "Run `x`, then add ..." is not.
+  const rest = todo.replace(/`[^`]+`/, "").replace(/\b(run|execute|use|with|the|command|in|to|create|the project|a new project|initialize|generate|install|add)\b/gi, "");
+  return !/\b(then|and|also|after|edit|update|implement|write|change|fix)\b/i.test(rest);
 }
 
 /** "server: tool, tool" per MCP server, for the system prompt. */
@@ -362,8 +373,15 @@ export class Agent {
     const prefixTokens = s.prefix.reduce((n, m) => n + estimateTokens(m.content), 0);
     const historyBudget = Math.min(s.budget.conversation, s.budget.ctx - s.budget.tokens("output") - prefixTokens);
 
-    for (let step = 0; step < maxSteps; step++) {
+    // The limit grows while the todo keeps making progress (edits apply): one broad todo such as
+    // "create the project" can legitimately need more steps; a stuck one doesn't get them.
+    let stepLimit = maxSteps;
+    let lastProgress = -1;
+    let lastFailure = -1;
+    for (let step = 0; step < stepLimit; step++) {
       if (s.signal?.aborted) throw new Cancelled();
+      // Progress = edits apply and nothing failed lately (edit → failing build → edit is thrashing, not progress).
+      if (step === stepLimit - 1 && step - lastProgress <= 3 && step - lastFailure > 3 && stepLimit < maxSteps * 2) stepLimit += 5;
       stats.steps++;
 
       const compacted = history.compactIfNeeded(historyBudget);
@@ -411,7 +429,17 @@ export class Agent {
       if (action.thought) emit({ type: "thought", text: action.thought });
       stats.toolCalls++;
 
-      const checked = await this.registry.check(action, enabled, ctx);
+      // The model asked for a hidden optional tool by name (e.g. start_process): that is the
+      // clearest signal it needs it, so offer its group instead of rejecting the call.
+      let offered = enabled;
+      if (!enabled.some((t) => t.name === action.tool)) {
+        const wanted = this.registry.all.find((t) => t.name === action.tool);
+        if (wanted?.group && this.unlockGroup(wanted, ctx)) {
+          offered = this.registry.enabled(mode, ctx).filter((t) => !answerNow || t.name === "answer");
+          if (offered.includes(wanted)) log?.write("unlocked", { tool: wanted.name, group: wanted.group });
+        }
+      }
+      const checked = await this.registry.check(action, offered, ctx);
       if (!checked.ok) {
         stats.invalidCalls++;
         failures++;
@@ -454,6 +482,7 @@ export class Agent {
           const failed = await this.verify(checks, emit);
           if (failed) {
             repairs++;
+            lastFailure = step;
             log?.write("verify", { ok: false, repairs });
             if (repairs > maxRepairs) return { ok: false, summary: `verification still failing after ${maxRepairs} repair attempts` };
             history.add(assistant, `Not done yet: verification failed.\n${failed}\nFix the cause (attempt ${repairs}/${maxRepairs}), then call done again.`, "done: verification failed");
@@ -483,10 +512,12 @@ export class Agent {
       log?.write("tool", { tool: tool.name, args, ok: result.ok, summary: result.summary, changed: result.changed });
       emit({ type: "tool", tool: tool.name, args, result });
       failures = result.ok ? 0 : failures + 1;
+      if (!result.ok && !result.noop) lastFailure = step;
 
       let observation = result.output;
       if (result.changed?.length) {
         stats.editsApplied++;
+        lastProgress = step;
         // Agent files (.agent/memory.md) don't need the project's build/tests.
         if (result.changed.some((f) => !f.startsWith(".agent/"))) changedInTodo = true;
         result.changed.forEach((f) => s.changed.add(f));
@@ -496,6 +527,7 @@ export class Agent {
         const errors = (await host.diagnostics(result.changed)).filter((d) => d.severity === "error");
         if (errors.length) {
           repairs++;
+          lastFailure = step;
           emit({ type: "verify", ok: false, output: formatDiagnostics(errors) });
           if (repairs > maxRepairs) return { ok: false, summary: `errors remain after ${maxRepairs} repair attempts:\n${formatDiagnostics(errors, 10)}` };
           observation += `\n\nThe change introduced errors (repair attempt ${repairs}/${maxRepairs}):\n${formatDiagnostics(errors)}`;
@@ -504,6 +536,12 @@ export class Agent {
         }
       }
       history.add(assistant, observation, result.summary);
+      // A todo that is just "Run `cmd`" is done once that command succeeded; small models
+      // otherwise carry on with the next todos inside this one and lose track of the plan.
+      // Only with todos left: when the plan squeezed the whole task into this one, the model must go on.
+      if (tool.name === "run_command" && result.ok && index < todos.length - 1 && commandTodo(todos[index], String(args.command))) {
+        return completeAuto("its command succeeded");
+      }
       // The model keeps "editing" without changing anything: the work is likely done but it
       // doesn't know. Check it ourselves and close the todo if the checks pass.
       if (noopStreak >= 2) {
@@ -515,7 +553,7 @@ export class Agent {
         if (end) return end;
       }
     }
-    return { ok: false, summary: `no result after ${maxSteps} steps` };
+    return { ok: false, summary: `no result after ${stepLimit} steps` };
   }
 
   /**
@@ -594,11 +632,21 @@ export class Agent {
   private async verify(commands: string[], emit: (e: AgentEvent) => void): Promise<string | undefined> {
     for (const cmd of commands) {
       const r = await this.deps.host.runCommand(cmd, undefined, { timeoutMs: 300_000 }); // first build may restore packages
-      const output = `$ ${cmd}\nexit code ${r.exitCode}\n${r.exitCode === 0 ? r.output : failureReport(r.output, this.deps.host.root, 80)}`;
+      const layout = r.exitCode !== 0 && /\bdotnet\b/.test(cmd) ? nestedProjectProblem(await listFiles(this.deps.host)) : undefined;
+      const output = `$ ${cmd}\nexit code ${r.exitCode}\n${r.exitCode === 0 ? r.output : failureReport(r.output, this.deps.host.root, 80)}${layout ? `\n\nLikely cause: ${layout}` : ""}`;
       emit({ type: "verify", ok: r.exitCode === 0, output });
       if (r.exitCode !== 0) return output;
     }
     return undefined;
+  }
+
+  /** Makes a hidden optional tool's group available for this todo; false when it can't be (not configured). */
+  private unlockGroup(tool: ToolDef, ctx: ToolContext): boolean {
+    if (tool.available && !tool.available(ctx)) return false;
+    if (tool.group === "mcp") (ctx.mcpTools ??= new Set()).add(tool.name);
+    else if (tool.group === "symbols") ctx.largeFiles = true;
+    else if (tool.group) (ctx.needs ??= new Set()).add(tool.group);
+    return true;
   }
 
   /** Read-only sub-run for the explore tool; its tool calls show up as status lines. */

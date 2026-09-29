@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
+import { cleanTerminalOutput } from "../tools/output";
 import { CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, FileChange, Host } from "./types";
 
 export interface NodeHostOptions {
@@ -88,7 +89,13 @@ export class NodeHost implements Host {
     const timeoutMs = opts.timeoutMs ?? this.opts.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     return new Promise((resolve) => {
       // detached: a process group, so a timeout also stops servers the shell started.
-      const p = spawn(command, { cwd: path.join(this.root, opts.cwd ?? "."), shell: true, signal, detached: process.platform !== "win32" });
+      const p = spawn(command, {
+        cwd: path.join(this.root, opts.cwd ?? "."),
+        shell: true,
+        signal,
+        detached: process.platform !== "win32",
+        env: { ...process.env, MSBUILDTERMINALLOGGER: "off" },
+      });
       let output = "";
       let timedOut = false;
       const timer = setTimeout(() => {
@@ -108,7 +115,7 @@ export class NodeHost implements Host {
       });
       p.on("close", (code) => {
         clearTimeout(timer);
-        resolve({ exitCode: code ?? -1, output, timedOut });
+        resolve({ exitCode: code ?? -1, output: cleanTerminalOutput(output), timedOut });
       });
     });
   }

@@ -32,12 +32,13 @@ Keys: `1` `2` `3`, arrows and Enter, `Esc`.
 
 ![Plan mode, then running the plan with a command approval](media/screenshots/plan.png)
 
-**Four modes**, switched with `Shift+Tab` in the chat:
+**Five modes**, switched with `Shift+Tab` in the chat (or the mode chip):
 
 | Mode | |
 |---|---|
-| Ask before edits | Plans and edits, asks before every change (default) |
-| Edit automatically | Applies edits without asking |
+| Ask before edits | Plans and edits, asks before every change and new command (default) |
+| Edit automatically | Applies edits without asking; still asks before new commands |
+| Run everything | Edits and terminal commands without asking (`/yolo`). Dangerous commands stay blocked, and a checkpoint is taken before each run |
 | Plan mode | Only proposes a plan; press **Run this plan** when it looks right |
 | Read-only | Answers questions about your code, never edits |
 
@@ -77,18 +78,85 @@ Review $ARGUMENTS for bugs and list them. Do not change code.
 - `Ctrl+I` / `Cmd+I`: rewrite the selection from an instruction and review it as an inline diff (`Tab` accepts, `Esc` rejects)
 - Autocomplete (ghost text) using the model's fill-in-the-middle tokens
 - A context usage indicator, and a repository map (built with tree-sitter) so the model knows your code's structure
-- Guard rails: server and watch commands (`npm run dev`, `dotnet run` on web projects, ...) are refused, commands time out after 2 minutes, and dangerous commands (`rm -rf`, `sudo`, `git push --force`, ...) are always blocked
+- Guard rails: servers and watchers (`dotnet run` on web projects, `npm run dev`, ...) run in the background and are stopped when the task ends, other commands time out after 2 minutes, and dangerous commands (`rm -rf`, `sudo`, `git push --force`, ...) are always blocked, in every mode
 
 ![Welcome screen](media/screenshots/welcome.png)
 
 ## Choosing a model
 
-| Model | VRAM | Notes |
+| Model | Memory (default context) | Notes |
 |---|---|---|
-| `qwen2.5-coder:7b` (default) | ~6 GB | Fastest; also powers autocomplete |
-| `qwen3.5:9b` | ~8 GB | Noticeably more accurate (solved every task in our evaluation set), long context is cheap; about 30% slower |
+| `qwen2.5-coder:7b` (default) | 6.4 GB at 32k | Fastest; also powers autocomplete. Its context tops out at 32k |
+| `qwen3.5:9b` | 7.9 GB at 64k | More accurate (solved every task in our first evaluation set), long context is cheap, sees images; about 30% slower |
 
-Pick the model in the chat. With `qwen3.5` as the chat model, autocomplete automatically uses an installed coder model. Any other Ollama or OpenAI-compatible model works too; set a per-model profile in `localAgent.profiles` if it needs a different context size.
+Pick the model in the chat. With `qwen3.5` as the chat model, autocomplete automatically uses an installed coder model. Any other Ollama or OpenAI-compatible model works too (see below for its context size).
+
+## Context size and hardware
+
+The context window is how much the model sees at once: the system prompt, the repository map, the files it read and the conversation so far. Agent Lolo sends the size with every request (Ollama's `num_ctx`), so you don't need a Modelfile or `OLLAMA_CONTEXT_LENGTH`. The ring in the chat's toolbar (e.g. `3.4k / 64k`) shows how much of it the conversation uses.
+
+A typical task uses about 2k tokens and rarely more than 6k, so the default 32k is plenty for single tasks. A larger window helps with long conversations, big files and many open tabs; the agent gives each part of the prompt a fixed share of the window (45% files, 25% history, 12% repository map), so everything grows with it. The price is memory and slower prompt reading.
+
+**How to change it.** This setting is a list, so the Settings screen can't show it as a field; you set it in the settings file:
+
+1. Press `Ctrl+Shift+P` (`Cmd+Shift+P` on a Mac) and run **Preferences: Open User Settings (JSON)**.
+2. Add these lines inside the outer `{ }` (put a comma after the line before them):
+
+   ```json
+   "localAgent.profiles": [
+     { "match": "qwen3.5", "ctx": 131072 }
+   ]
+   ```
+
+   - `match`: the start of the model's name, e.g. `qwen3.5`, `qwen2.5-coder`, `qwen3-coder`. Add one `{ ... }` per model, separated by commas.
+   - `ctx`: the context size in tokens: `32768` (32k), `65536` (64k), `131072` (128k) or `262144` (256k).
+3. Save the file. The next message uses the new size; the ring in the chat's toolbar then shows `… / 128k`.
+
+Without this setting the defaults are: `qwen2.5-coder` 32k, `qwen3.5` 64k, `qwen3-coder` 64k, any other model 8k. Pick the size for your machine from the tables below.
+
+Don't set more than the model was trained for: `qwen2.5-coder` is a 32k model, and Ollama silently caps it there (64k uses exactly the same memory as 32k), while the agent would plan for the larger window and send prompts that get cut. `qwen3.5` and `qwen3-coder` support up to 256k.
+
+**Memory.** Model weights are a fixed cost; the context adds to it linearly. Measured with Ollama 0.34 (Q4_K_M, total of GPU + system RAM):
+
+| Model | 8k | 16k | 32k | 64k | 128k | 256k |
+|---|---|---|---|---|---|---|
+| `qwen2.5-coder:7b` | 4.6 GB | 5.4 GB | 6.4 GB | (capped at 32k) | | |
+| `qwen3.5:9b` | | | 6.7 GB | 7.9 GB | 10.3 GB | 15.1 GB |
+
+`qwen3.5` only keeps a cache for one in four layers, so each extra 32k costs about 1.2 GB, which is why its long context is affordable. Estimates for larger models, from their architecture (weights + 16-bit context cache):
+
+| Model | Weights | + per 32k context | Total at 32k |
+|---|---|---|---|
+| `qwen2.5-coder:14b` | ~9 GB | ~6 GB | ~15.5 GB |
+| `qwen2.5-coder:32b` | ~20 GB | ~8 GB | ~29 GB |
+| `qwen3-coder:30b` (MoE, 3B active) | ~19 GB | ~3 GB | ~22 GB |
+
+What doesn't fit in GPU memory runs from system RAM on the CPU: it still works, but more slowly. `ollama ps` shows the split (e.g. `76%/24% GPU/CPU`). Leave 1–2 GB of VRAM for the desktop.
+
+**What to run on what:**
+
+| Your machine | Model and context |
+|---|---|
+| No GPU, 16 GB RAM | `qwen2.5-coder:7b`, 8–16k (slow; fine for small tasks and autocomplete) |
+| 6 GB VRAM | `qwen2.5-coder:7b`, 16k |
+| 8 GB VRAM (our test box, RTX 5060) | `qwen2.5-coder:7b` 32k, or `qwen3.5:9b` 64k (~13 tok/s in agent runs) |
+| 12 GB VRAM | `qwen3.5:9b` 128k, or `qwen2.5-coder:14b` 8–16k |
+| 16 GB VRAM | `qwen2.5-coder:14b` 16–32k, or `qwen3.5:9b` 256k |
+| 24 GB VRAM | `qwen3-coder:30b` 32–64k |
+| 8–12 GB VRAM + 32 GB RAM | `qwen3-coder:30b` 32k, partly on the CPU: as a mixture-of-experts model it computes only ~3B parameters per token, so the CPU share hurts less than with a dense model |
+| 48 GB+ VRAM (or a Mac with 64 GB) | `qwen2.5-coder:32b` 32k, or `qwen3-coder:30b` 256k |
+
+The upper ends of these ranges fill the GPU completely; when a little spills over to RAM it still works, just slower. On a Mac, unified memory counts as VRAM: plan with about 70% of it.
+
+**Halve the context memory** by letting Ollama store the cache in 8 bits (small quality cost), e.g. on Linux with `sudo systemctl edit ollama`:
+
+```ini
+[Service]
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+```
+
+**Other servers** (llama.cpp, LM Studio, vLLM) set the context when they load the model, e.g. `llama-server -c 65536`; set the same `ctx` in `localAgent.profiles` so the agent plans for it.
 
 You also need `git` on your PATH (for checkpoints).
 
@@ -121,6 +189,7 @@ You can write in any language, but small coder models understand English best. F
 | `localAgent.model` | `qwen2.5-coder:7b` | Also selectable in the chat |
 | `localAgent.profiles` | `[]` | Per-model overrides, e.g. `{ "match": "qwen3.5", "ctx": 131072 }` |
 | `localAgent.autoApproveEdits` | `false` | Apply edits without asking (a checkpoint is still taken) |
+| `localAgent.autoRunCommands` | `false` | Start the chat in "Run everything" mode |
 | `localAgent.commandAllowlist` | build/test commands | Commands the agent may run without asking |
 | `localAgent.maxStepsPerTodo` | `15` | Step limit per plan item |
 | `localAgent.web.search` | `off` | `searxng`, `brave`, `tavily` or `duckduckgo`; keys via "Agent Lolo: Set Web Search API Key" |

@@ -1,4 +1,4 @@
-import { truncateOutput } from "./output";
+import { cleanTerminalOutput, truncateOutput } from "./output";
 
 export interface TestFailure {
   name: string;
@@ -8,7 +8,7 @@ export interface TestFailure {
   message: string;
 }
 
-const clean = (s: string) => s.replace(/\r\n/g, "\n").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+const clean = cleanTerminalOutput;
 const clip = (s: string, n = 200) => (s.length > n ? s.slice(0, n - 3) + "..." : s);
 
 /** Pulls failed tests out of jest/vitest, node:test, pytest, unittest, dotnet test and cargo test output. */

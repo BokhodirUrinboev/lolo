@@ -6,17 +6,19 @@ import { post, uiState } from "./vscode";
 // ---------------------------------------------------------------------------
 // Modes as the user sees them (Claude Code style): permission level + plan/read-only.
 
-type UiMode = "agent" | "auto" | "plan" | "ask";
+type UiMode = "agent" | "auto" | "full" | "plan" | "ask";
 const UI_MODES: { id: UiMode; label: string; icon: string; hint: string }[] = [
   { id: "agent", label: "Ask before edits", icon: "shield", hint: "Plans and edits; asks before every file change and new command" },
-  { id: "auto", label: "Edit automatically", icon: "zap", hint: "Applies edits without asking (a checkpoint is taken before each run)" },
+  { id: "auto", label: "Edit automatically", icon: "zap", hint: "Applies edits without asking; still asks before new commands" },
+  { id: "full", label: "Run everything", icon: "rocket", hint: "Edits and terminal commands without asking; dangerous commands stay blocked, a checkpoint is taken" },
   { id: "plan", label: "Plan mode", icon: "checklist", hint: "Only proposes a plan; nothing is changed" },
   { id: "ask", label: "Read-only", icon: "eye", hint: "Answers questions about the code; never edits" },
 ];
-const uiModeOf = (s: ViewState): UiMode => (s.mode === "agent" ? (s.autoAccept ? "auto" : "agent") : s.mode);
+const uiModeOf = (s: ViewState): UiMode => (s.mode === "agent" ? (s.autoRun ? "full" : s.autoAccept ? "auto" : "agent") : s.mode);
 function setUiMode(m: UiMode) {
-  post({ type: "setMode", mode: m === "auto" ? "agent" : (m as Mode) });
-  post({ type: "setAutoAccept", on: m === "auto" });
+  post({ type: "setMode", mode: m === "auto" || m === "full" ? "agent" : (m as Mode) });
+  post({ type: "setAutoAccept", on: m === "auto" || m === "full" });
+  post({ type: "setAutoRun", on: m === "full" });
 }
 
 const TOOL_VERB: Record<string, string> = {
@@ -57,6 +59,7 @@ const SLASH: { cmd: string; hint: string; run: () => void }[] = [
   { cmd: "/plan", hint: "Switch to plan mode", run: () => setUiMode("plan") },
   { cmd: "/agent", hint: "Ask before edits", run: () => setUiMode("agent") },
   { cmd: "/auto", hint: "Edit automatically", run: () => setUiMode("auto") },
+  { cmd: "/yolo", hint: "Run everything: edits and commands without asking", run: () => setUiMode("full") },
   { cmd: "/ask", hint: "Read-only questions", run: () => setUiMode("ask") },
   { cmd: "/restore", hint: "Restore a checkpoint", run: () => post({ type: "command", id: "restoreCheckpoint" }) },
   { cmd: "/edit", hint: "Edit the selection in the editor (Ctrl+I)", run: () => post({ type: "command", id: "inlineEdit" }) },

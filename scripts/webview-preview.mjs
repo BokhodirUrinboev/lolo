@@ -18,6 +18,7 @@ const scenarios = {
     mode: "agent",
     running: true,
     autoAccept: false,
+    autoRun: false,
     context: { used: 5230, total: 65536 },
     turns: [
       {
@@ -48,16 +49,16 @@ const scenarios = {
   },
   empty: {
     sessionId: "2", title: "", sessions: [], activeFile: "README.md", models: ["qwen3.5:9b"], model: "qwen3.5:9b",
-    mode: "agent", running: false, autoAccept: false, context: { used: 0, total: 32768 }, turns: [],
+    mode: "agent", running: false, autoAccept: false, autoRun: false, context: { used: 0, total: 32768 }, turns: [],
     setup: { problem: "no-model", model: "qwen2.5-coder:7b", endpoint: "http://localhost:11434", installed: ["qwen3.5:9b"] },
   },
   welcome: {
     sessionId: "4", title: "", sessions: [], activeFile: "src/cart.js", models: ["qwen3.5:9b"], model: "qwen3.5:9b",
-    mode: "agent", running: false, autoAccept: false, context: { used: 0, total: 65536 }, turns: [],
+    mode: "agent", running: false, autoAccept: false, autoRun: false, context: { used: 0, total: 65536 }, turns: [],
   },
   command: {
     sessionId: "3", title: "create simple todo api in .net", sessions: [], models: ["qwen3.5:9b"], model: "qwen3.5:9b",
-    mode: "agent", running: true, autoAccept: true, context: { used: 2100, total: 65536 },
+    mode: "agent", running: true, autoAccept: true, autoRun: true, context: { used: 2100, total: 65536 },
     turns: [
       {
         id: String(t0),
@@ -81,7 +82,7 @@ const scenarios = {
   // New tool kinds: image attachment, rename across files, MCP and web rows.
   tools: {
     sessionId: "3", title: "Rename calcTotal", sessions: [], activeFile: "src/pricing.js",
-    models: ["qwen3.5:9b"], model: "qwen3.5:9b", mode: "agent", running: true, autoAccept: false, context: { used: 3400, total: 65536 },
+    models: ["qwen3.5:9b"], model: "qwen3.5:9b", mode: "agent", running: true, autoAccept: false, autoRun: false, context: { used: 3400, total: 65536 },
     turns: [
       {
         id: String(t0 + 2),

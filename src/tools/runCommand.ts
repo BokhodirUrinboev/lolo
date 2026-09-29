@@ -1,16 +1,18 @@
+import { nestedProjectProblem } from "../context/projectChecks";
+import { listFiles } from "../context/repoMap";
 import { decideCommand } from "./commandPolicy";
 import { truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
 import { startProcess } from "./processes";
 import { failureReport } from "./testReport";
-import { fail, ok, ToolContext, ToolDef } from "./types";
+import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
 
 export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
   name: "run_command",
   kind: "exec",
   description:
     "Run a shell command (build, test, lint, project generators) and get its exit code and output. `cwd`: folder relative to the workspace root (default: root). " +
-    "Commands are stopped after 2 minutes: never start servers or watchers (dotnet run, npm start, npm run dev).",
+    "Commands are stopped after 2 minutes; servers and watchers (dotnet run, npm start, npm run dev) are started in the background instead.",
   params: { type: "object", properties: { command: { type: "string", minLength: 1 }, cwd: { type: "string" } }, required: ["command"] },
   async check(a, ctx) {
     if (a.cwd === undefined) return undefined;
@@ -21,35 +23,72 @@ export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
     return undefined;
   },
   async run(a, ctx) {
-    const server = await serverReason(a.command, a.cwd ?? ".", ctx);
-    if (server) {
-      // The todo may really need the server running (e.g. "check the endpoint with curl"): offer start_process.
-      const bg = ctx.processes ? ` If the task needs it running (to call it with curl), use start_process instead: ${startProcess.description.split(". ")[0]}.` : "";
-      if (ctx.processes) (ctx.needs ??= new Set()).add("process");
-      return fail(`Not run: ${server}${bg}`, `run_command "${a.command}": refused (server)`);
-    }
-    const decision = decideCommand(a.command, ctx.commandAllowlist);
-    if (decision.kind === "block") return fail(`Command blocked (${decision.reason}). Do not retry it.`, `run_command "${a.command}": blocked`);
-    if (decision.kind === "confirm") {
-      const approval = ctx.host.approveCommand
-        ? await ctx.host.approveCommand(a.command, decision.reason)
-        : { ok: await ctx.host.confirm(`Run \`${a.command}\`? (${decision.reason})`) };
-      if (!approval.ok) {
-        const why = approval.feedback ? ` They said: ${approval.feedback}` : "";
-        return fail(`The user declined to run this command.${why}`, `run_command "${a.command}": declined`);
-      }
-    }
-    const r = await ctx.host.runCommand(a.command, ctx.signal, { cwd: a.cwd });
-    const out = r.exitCode === 0 ? truncateOutput(r.output) : failureReport(r.output, ctx.host.root);
-    const where = a.cwd && a.cwd !== "." ? ` (in ${a.cwd})` : "";
-    const timeout = r.timedOut
-      ? "\n[Timed out after 2 minutes and was stopped. Servers and watchers never finish; check your work with a build or tests instead.]"
-      : "";
-    const text = `$ ${a.command}${where}\nexit code ${r.exitCode}\n${out}${timeout}`;
-    const summary = `run_command "${a.command}"${where}: ${r.timedOut ? "timed out" : `exit ${r.exitCode}`}`;
-    return r.exitCode === 0 ? ok(text, summary) : { ok: false, output: text, summary };
+    const moved = await rootRelativePaths(a.command, a.cwd, ctx);
+    if (moved) a.cwd = undefined;
+    const note = moved ? `(Ran from the workspace root: ${moved} is relative to the root, not to cwd.)\n` : "";
+    const res = await runIn(a, ctx);
+    return note ? { ...res, output: note + res.output } : res;
   },
 };
+
+/**
+ * Models set `cwd` and then write paths from the workspace root ("cwd: TodoApi" +
+ * "dotnet build TodoApi/TodoApi.csproj"); the command fails with "file not found" and
+ * the model concludes its fix didn't work. When every path in the command exists from
+ * the root but not from cwd, the command runs from the root. Returns the path, if so.
+ */
+async function rootRelativePaths(command: string, cwd: string | undefined, ctx: ToolContext): Promise<string | undefined> {
+  if (!cwd || cwd === ".") return undefined;
+  const tokens = command.split(/\s+/).map((t) => t.replace(/^["']|["']$/g, "")).filter((t) => /[\\/]/.test(t) && !/^(-|https?:|\/)/.test(t) && !t.includes(".."));
+  if (!tokens.length) return undefined;
+  let found: string | undefined;
+  for (const t of tokens) {
+    const fromCwd = await ctx.host.stat(`${cwd}/${t}`.replace(/\/\.\//g, "/"));
+    if (fromCwd) return undefined; // at least one path is meant from cwd
+    if (await ctx.host.stat(t.replace(/^\.\//, ""))) found ??= t;
+  }
+  return found;
+}
+
+async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Promise<ToolResult> {
+  const server = await serverReason(a.command, a.cwd ?? ".", ctx);
+  if (server) {
+    // A server never exits: run it in the background (like start_process) instead of waiting for the timeout.
+    if (ctx.processes) {
+      (ctx.needs ??= new Set()).add("process");
+      const r = await startProcess.run({ command: a.command, cwd: a.cwd }, ctx);
+      return { ...r, output: `This starts a server, so it runs in the background (read its output with process_logs).\n${r.output}` };
+    }
+    return fail(`Not run: ${server}`, `run_command "${a.command}": refused (server)`);
+  }
+  const decision = decideCommand(a.command, ctx.commandAllowlist);
+  if (decision.kind === "block") return fail(`Command blocked (${decision.reason}). Do not retry it.`, `run_command "${a.command}": blocked`);
+  if (decision.kind === "confirm") {
+    const approval = ctx.host.approveCommand
+      ? await ctx.host.approveCommand(a.command, decision.reason)
+      : { ok: await ctx.host.confirm(`Run \`${a.command}\`? (${decision.reason})`) };
+    if (!approval.ok) {
+      const why = approval.feedback ? ` They said: ${approval.feedback}` : "";
+      return fail(`The user declined to run this command.${why}`, `run_command "${a.command}": declined`);
+    }
+  }
+  const before = new Set(await listFiles(ctx.host));
+  const r = await ctx.host.runCommand(a.command, ctx.signal, { cwd: a.cwd });
+  // Generators (dotnet new, npm create) decide the layout; show it so later steps use real paths.
+  const created = (await listFiles(ctx.host)).filter((f) => !before.has(f)).sort();
+  const newFiles = created.length ? `\nNew files (${created.length}): ${created.slice(0, 20).join(", ")}${created.length > 20 ? ", ..." : ""}` : "";
+  const out = r.exitCode === 0 ? truncateOutput(r.output) : failureReport(r.output, ctx.host.root);
+  const where = a.cwd && a.cwd !== "." ? ` (in ${a.cwd})` : "";
+  const timeout = r.timedOut
+    ? "\n[Timed out after 2 minutes and was stopped. Servers and watchers never finish; check your work with a build or tests instead.]"
+    : "";
+  // A project generated inside another project's folder breaks the outer build: say so now, and on every failing dotnet command.
+  const layout =
+    (created.some((f) => /\.(cs|fs|vb)proj$/.test(f)) || (r.exitCode !== 0 && /\bdotnet\b/.test(a.command))) && nestedProjectProblem([...before, ...created]);
+  const text = `$ ${a.command}${where}\nexit code ${r.exitCode}\n${out}${timeout}${newFiles}${layout ? `\n\nWarning: ${layout}` : ""}`;
+  const summary = `run_command "${a.command}"${where}: ${r.timedOut ? "timed out" : `exit ${r.exitCode}`}`;
+  return r.exitCode === 0 ? ok(text, summary) : { ok: false, output: text, summary };
+}
 
 const SERVER_COMMANDS: [RegExp, string][] = [
   [/\bdotnet\s+watch\b/, "dotnet build"],

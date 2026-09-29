@@ -57,11 +57,25 @@ describe("start_process", () => {
     expect(r.output).toContain("boom: port in use");
   });
 
-  it("run_command refuses servers and unlocks start_process for the todo", async () => {
-    const { ctx } = setup();
+  it("run_command starts servers in the background instead of refusing them", async () => {
+    const { ctx, processes } = setup();
+    writeFileSync(path.join(ctx.host.root, "package.json"), JSON.stringify({ scripts: { dev: "node server.js" } }));
+    ctx.commandAllowlist = ["npm run dev"];
     const r = await tool("run_command").run({ command: "npm run dev" }, ctx);
-    expect(r.ok).toBe(false);
-    expect(r.output).toContain("start_process");
-    expect(new ToolRegistry().enabled("agent", ctx).map((t) => t.name)).toContain("start_process");
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("runs in the background");
+    expect(r.output).toMatch(/listening at http:\/\/127\.0\.0\.1:\d+/);
+    expect(new ToolRegistry().enabled("agent", ctx).map((t) => t.name)).toContain("process_logs");
+    await processes.stopAll();
+  });
+});
+
+describe("listenUrl", () => {
+  it("prefers the local listening address over other URLs in the log", async () => {
+    const { listenUrl } = await import("../src/tools/processes");
+    const log = "warning NU1903: Package 'X' has a known vulnerability, https://github.com/advisories/GHSA-2m69\ninfo: Microsoft.Hosting.Lifetime[14]\n      Now listening on: http://[::]:5291\n";
+    expect(listenUrl(log)).toBe("http://localhost:5291");
+    expect(listenUrl("  ➜  Local:   http://127.0.0.1:5173/")).toBe("http://127.0.0.1:5173");
+    expect(listenUrl("see https://docs.example.com/page")).toBeUndefined();
   });
 });

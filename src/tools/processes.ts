@@ -116,6 +116,13 @@ function portOpen(port: number): Promise<boolean> {
   });
 }
 
+/** The address the server listens on; other URLs in the log (docs, advisories) don't count. */
+export function listenUrl(output: string): string | undefined {
+  const local = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\*|\+):\d+/.exec(output)?.[0];
+  const url = local ?? /https?:\/\/[\w.-]+:\d+/.exec(output)?.[0];
+  return url?.replace(/0\.0\.0\.0|\[::1?\]|\*|\+/, "localhost");
+}
+
 function tail(text: string, lines = 30): string {
   return truncateOutput(text.split("\n").slice(-lines).join("\n"), lines);
 }
@@ -163,7 +170,7 @@ export const startProcess: ToolDef<{ command: string; cwd?: string; port?: numbe
         `start_process "${a.command}": exited ${p.exitCode}`,
       );
     }
-    const url = /https?:\/\/[^\s"'<>]+/.exec(p.output)?.[0]?.replace(/0\.0\.0\.0|\[::\]/, "localhost");
+    const url = listenUrl(p.output);
     const head =
       state === "ready"
         ? `Started \`${a.command}\` in the background (process ${p.id})${url ? `, listening at ${url}` : a.port ? ` on port ${a.port}` : ""}.`

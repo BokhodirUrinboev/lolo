@@ -185,6 +185,7 @@ pre.diff .hunk { color: var(--muted); }
 .mode-chip { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 6px; color: var(--muted); font-size: 0.9em; white-space: nowrap; }
 .mode-chip:hover { background: var(--surface-2); color: var(--fg); }
 .mode-chip.auto { color: var(--star); }
+.mode-chip.full { color: var(--vscode-charts-red, #f14c4c); }
 .mode-chip.plan { color: var(--vscode-charts-blue, #3794ff); }
 .send { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: var(--vscode-button-background); color: var(--vscode-button-foreground); margin-left: 2px; }
 .send:disabled { background: var(--surface-2); color: var(--muted); opacity: 1; }

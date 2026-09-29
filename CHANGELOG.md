@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1
+
+- "Run everything" mode (`/yolo`, `localAgent.autoRunCommands`): edits and terminal commands without asking; dangerous commands stay blocked. The chosen mode now carries over to new conversations.
+- `dotnet run`, `npm run dev` and other servers are no longer refused: they start in the background, and the agent can call them with `curl`.
+- When the model asks for a tool that is hidden for the current task (e.g. `start_process`), it gets it instead of an error loop.
+- Generated projects: `run_command` lists the files a generator created, a missing path suggests the existing file with the same name, and a second `Program.cs` (or `package.json`, ...) in the same project is refused. This fixes runs that created `src/TodoApi/Program.cs` next to the template's and never built again.
+- A todo that only runs one command (e.g. "Run `dotnet new webapi -n TodoApi`") is completed as soon as that command succeeds when more todos follow, and a todo that keeps making progress without failures gets more steps.
+- .NET: a project inside another project's folder (e.g. `TodoApi/TodoApi.Tests`) is diagnosed on failing builds with the fix (move it, or `<Compile Remove>`); before, the outer project failed with "Xunit could not be found" and the agent kept editing the test project. New NuGet and npm packages must come from `dotnet add package` / `npm install` instead of hand-edited versions (a guessed EF Core 9 in a .NET 10 project). Files named only `.sln` are refused.
+- `run_command` with `cwd` and paths written from the workspace root (`cwd: TodoApi`, `dotnet build TodoApi/TodoApi.csproj`) runs from the root instead of failing with "file not found".
+- `start_process` reports the address the server listens on, not the first URL in its log.
+- Command output is cleaned of terminal control sequences and progress redraws (the MSBuild terminal logger is turned off).
+- README: context size and hardware guide.
+
 ## 0.4.0
 
 Stages 11–14 of the plan: stronger tools, web, MCP, memory. Every optional tool is offered only when a task needs it, so small models still see ≤ 10 tools per step.

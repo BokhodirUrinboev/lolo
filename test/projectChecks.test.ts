@@ -52,3 +52,14 @@ describe("run_command server guard", async () => {
     expect((await runCommand.run({ command: "echo ok", cwd: "Cli" }, ctxFor(host))).ok).toBe(true);
   });
 });
+
+describe("nestedProjectProblem", () => {
+  it("explains a test project created inside the API project's folder", async () => {
+    const { nestedProjectProblem } = await import("../src/context/projectChecks");
+    const msg = nestedProjectProblem(["TodoApi.slnx", "TodoApi/TodoApi.csproj", "TodoApi/Program.cs", "TodoApi/TodoApi.Tests/TodoApi.Tests.csproj", "TodoApi/TodoApi.Tests/TodosTests.cs"]);
+    expect(msg).toContain("TodoApi/TodoApi.Tests/TodoApi.Tests.csproj is inside the folder of TodoApi/TodoApi.csproj");
+    expect(msg).toContain('<Compile Remove="TodoApi.Tests/**" />');
+    expect(nestedProjectProblem(["src/Api/Api.csproj", "tests/Api.Tests/Api.Tests.csproj"])).toBeUndefined();
+    expect(nestedProjectProblem(["App.csproj", "Tests/Tests.csproj"])).toContain('Compile Remove="Tests/**"');
+  });
+});

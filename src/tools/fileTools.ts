@@ -1,3 +1,4 @@
+import { listFiles } from "../context/repoMap";
 import { fileSymbols, languageFor } from "../context/treeSitter";
 import { applyLineRange, editToolFor, EditTool, mergeLazyRewrite } from "../edit/formats";
 import { fuzzyApply } from "../edit/fuzzyApply";
@@ -8,6 +9,60 @@ import { symbolSummary } from "./output";
 import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
 
 const MAX_READ_LINES = 400;
+
+/**
+ * A package added by editing the project file: models guess versions (EF Core 9 in a .NET 10
+ * project), while the package manager picks the one that fits. Returns advice, or undefined.
+ */
+export function handAddedPackage(path: string, before: string, after: string): string | undefined {
+  if (/\.(cs|fs|vb)proj$/.test(path)) {
+    const refs = (t: string) => new Set([...t.matchAll(/<PackageReference\s+Include="([^"]+)"/gi)].map((m) => m[1].toLowerCase()));
+    const old = refs(before);
+    const added = [...after.matchAll(/<PackageReference\s+Include="([^"]+)"/gi)].map((m) => m[1]).filter((n) => !old.has(n.toLowerCase()));
+    if (added.length) {
+      const dir = path.split("/").slice(0, -1).join("/") || ".";
+      return `Don't add NuGet packages by editing ${path}: run \`dotnet add package ${added[0]}\` with cwd "${dir}" (one command per package). It picks the version that matches the project's .NET version. The file was NOT changed.`;
+    }
+  }
+  if (path === "package.json" || path.endsWith("/package.json")) {
+    const deps = (t: string) => {
+      try {
+        const j = JSON.parse(t);
+        return { ...j.dependencies, ...j.devDependencies } as Record<string, string>;
+      } catch {
+        return undefined;
+      }
+    };
+    const was = deps(before);
+    const now = deps(after);
+    const added = was && now ? Object.keys(now).filter((n) => !(n in was)) : [];
+    if (added.length) {
+      const dir = path.split("/").slice(0, -1).join("/") || ".";
+      return `Don't add packages by editing ${path}: run \`npm install ${added.join(" ")}\` (add -D for dev tools) with cwd "${dir}". It installs them and records a version that exists. The file was NOT changed.`;
+    }
+  }
+  return undefined;
+}
+
+/** Files a project has exactly one of: a second Program.cs means two sets of top-level statements (CS8802). */
+const ONE_PER_PROJECT = /^(Program\.cs|Startup\.cs|appsettings\.json|package\.json|tsconfig\.json|go\.mod|pyproject\.toml|Cargo\.toml|manage\.py)$/;
+const PROJECT_FILE = /(\.csproj|\.fsproj|^package\.json|^go\.mod|^pyproject\.toml|^Cargo\.toml)$/;
+
+/** An existing file with the same one-per-project name in the project `path` would belong to. */
+async function projectTwin(path: string, ctx: ToolContext): Promise<string | undefined> {
+  const name = path.split("/").pop()!;
+  if (!ONE_PER_PROJECT.test(name)) return undefined;
+  const files = await listFiles(ctx.host);
+  const dirs = new Set(files.filter((f) => PROJECT_FILE.test(f.split("/").pop()!)).map((f) => f.split("/").slice(0, -1).join("/")));
+  const projectOf = (p: string) => {
+    const parts = p.split("/").slice(0, -1);
+    for (let i = parts.length; i >= 0; i--) if (dirs.has(parts.slice(0, i).join("/"))) return parts.slice(0, i).join("/");
+    return undefined;
+  };
+  const project = projectOf(path);
+  if (project === undefined) return undefined;
+  return files.find((f) => f !== path && f.split("/").pop() === name && projectOf(f) === project);
+}
 
 const EDIT_HINT: Record<EditTool, string> = {
   rewrite_file: "rewrite_file with the complete new content",
@@ -40,9 +95,19 @@ async function mustUse(tool: EditTool, path: string, ctx: ToolContext): Promise<
   return undefined;
 }
 
+/** Existing files with the same name as `path` (plans guess folders before generators have run). */
+async function sameName(path: string, ctx: ToolContext): Promise<string[]> {
+  const name = path.split("/").pop()!;
+  return (await listFiles(ctx.host)).filter((f) => f !== path && f.split("/").pop() === name).slice(0, 5);
+}
+
 async function mustBeFile(path: string, ctx: ToolContext): Promise<string | undefined> {
   const kind = await ctx.host.stat(path);
-  if (kind === null) return `File "${path}" does not exist. To create it, use create_file (it creates missing folders); to find an existing file, use list_dir or search.`;
+  if (kind === null) {
+    const same = await sameName(path, ctx);
+    if (same.length) return `File "${path}" does not exist, but ${same.join(", ")} does. Use that path: the plan guessed the folder.`;
+    return `File "${path}" does not exist. To create it, use create_file (it creates missing folders); to find an existing file, use list_dir or search.`;
+  }
   if (kind === "dir") return `"${path}" is a directory. Use list_dir.`;
   return undefined;
 }
@@ -152,6 +217,8 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
       noop: true,
     };
   }
+  const pkg = before !== undefined ? handAddedPackage(path, before, content) : undefined;
+  if (pkg) return fail(pkg, `${reason}: rejected (package added by hand)`);
   const broken = await checkEditSyntax(path, before, content, fragment);
   if (broken) {
     ctx.edits.recordFailure(path);
@@ -250,6 +317,12 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
     if (await ctx.host.stat(a.path)) return `"${a.path}" already exists. Use edit to change it.`;
+    const base = a.path.split("/").pop()!;
+    if (/^\.(slnx?|csproj|fsproj|cs|py|js|ts|tsx|json|go|rs|java)$/.test(base)) {
+      return `"${base}" has no file name, only an extension. Name it (e.g. TodoApi${base})${/sln/.test(base) ? ", or better run `dotnet new sln -n <Name>` and `dotnet sln add <project>`" : ""}.`;
+    }
+    const twin = await projectTwin(a.path, ctx);
+    if (twin) return `${twin} already exists in this project, and a second ${a.path.split("/").pop()} would break it. Edit ${twin} instead.`;
     // An empty file is a wasted step (and then an edit on nothing); only markers may be empty.
     if (!a.content.trim() && !/(^|\/)(__init__\.py|\.gitkeep|\.keep|py\.typed)$/.test(a.path)) {
       return `content is empty. Create ${a.path} with its complete content in this call.`;

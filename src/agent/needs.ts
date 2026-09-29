@@ -9,7 +9,7 @@ const REFACTOR =
   /\brenam(e|ing)\b|\breferences?\b|\busages?\b|\bcallers?\b|\bwhere\b[^.\n]*\b(used|called|defined|declared)\b|\bdefin(ed|ition)\b|\ball (uses|calls)\b|nomini o'?zgartir|qayerda (ishlatil|chaqiril|e'?lon)|переимен|где (использ|вызыва|определ)/i;
 
 const PROCESS =
-  /\bcurl\b|\blocalhost\b|\b(start|run|launch|serve)\s+(the\s+|it\s+|this\s+)?(web\s*)?(app|application|server|api|site|backend|frontend)\b|\bin the background\b|\b(server|api|endpoint)\s+(responds|returns|works)\b|serverni (ishga tushir|yurgiz)|запусти (сервер|приложение)/i;
+  /\bcurl\b|\blocalhost\b|\bdotnet (run|watch)\b|\bnpm (run )?(start|dev|serve)\b|\b(start|run|launch)\s+(the\s+)?\w*(api|app|server)\b|\b(start|run|launch|serve)\s+(the\s+|it\s+|this\s+)?(web\s*)?(app|application|server|api|site|backend|frontend)\b|\bin the background\b|\b(server|api|endpoint)\s+(responds|returns|works)\b|serverni (ishga tushir|yurgiz)|запусти (сервер|приложение)/i;
 
 const WEB =
   /(^|\s)@web\b|https?:\/\/|\bsearch(ing)? (the )?(web|internet)\b(?! ?(page|app|site|form|ui))|\b(search|look(ing)? up|google|find|check)\b[^.\n]{0,40}\b(online|on the (web|internet))\b|\b(latest|newest|current)\s+(stable\s+)?(version|release)\b|\bofficial (docs|documentation)\b|\bchangelog\b|internetdan|internetda|в интернете|последн\w* верси/i;

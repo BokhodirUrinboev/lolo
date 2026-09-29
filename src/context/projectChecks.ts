@@ -26,3 +26,30 @@ export async function detectChecks(host: Host): Promise<string[]> {
 function quote(p: string) {
   return /^[\w./-]+$/.test(p) ? p : JSON.stringify(p);
 }
+
+/**
+ * .NET projects nested in another project's folder: the outer project compiles the inner
+ * one's .cs files (even its obj/ GlobalUsings), so the build fails in the outer project
+ * with errors that look like missing packages of the inner one ("Xunit could not be found").
+ * Models then keep editing the inner project, which is fine. Returns advice, or undefined.
+ */
+export function nestedProjectProblem(files: string[]): string | undefined {
+  const projects = files.filter((f) => /\.(cs|fs|vb)proj$/.test(f));
+  const dirOf = (f: string) => f.split("/").slice(0, -1).join("/");
+  for (const inner of projects) {
+    const innerDir = dirOf(inner);
+    const outer = projects.find((o) => {
+      const d = dirOf(o);
+      return o !== inner && d !== innerDir && (d === "" || innerDir.startsWith(`${d}/`));
+    });
+    if (!outer) continue;
+    const outerDir = dirOf(outer);
+    const rel = outerDir ? innerDir.slice(outerDir.length + 1) : innerDir;
+    return (
+      `${inner} is inside the folder of ${outer}, so ${outer} also compiles ${innerDir}/**/*.cs and fails with errors about the other project's packages. ` +
+      `Fix the layout, not the packages: move ${innerDir} next to ${outerDir || "the project"} (and update its ProjectReference and the solution), ` +
+      `or add <ItemGroup><Compile Remove="${rel}/**" /><Content Remove="${rel}/**" /><None Remove="${rel}/**" /></ItemGroup> to ${outer}.`
+    );
+  }
+  return undefined;
+}

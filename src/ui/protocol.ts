@@ -62,6 +62,8 @@ export interface ViewState {
   running: boolean;
   /** Session setting: apply edits without asking. */
   autoAccept: boolean;
+  /** Run terminal commands without asking too (dangerous ones stay blocked). */
+  autoRun: boolean;
   /** Tokens of the conversation's last model call vs the model's context window (always set). */
   context?: { used: number; total: number };
 }
@@ -92,6 +94,7 @@ export type FromWebview =
   | { type: "approval"; id: string; decision: "yes" | "always" | "no"; feedback?: string }
   | { type: "openDiff"; id: string }
   | { type: "setAutoAccept"; on: boolean }
+  | { type: "setAutoRun"; on: boolean }
   | { type: "runPlan"; turnId: string }
   | { type: "restore"; checkpoint: string }
   | { type: "applyCode"; code: string }

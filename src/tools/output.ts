@@ -1,11 +1,31 @@
 const ERROR_LINE = /\b(error|errors|fail(ed|ure)?|exception|panic|traceback|cannot|undefined reference|not found)\b|✗|✘|FAIL\b|\bE\d{3,}\b|\bCS\d{4}\b|\bTS\d{4}\b/i;
 
+/** Terminal control sequences: CSI (incl. private modes like `ESC[?25l`), OSC, charset/keypad switches. */
+const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78]/g;
+/** Progress-only lines, e.g. the MSBuild terminal logger's `(0.3s)` timers. */
+const PROGRESS = /^\s*(\(\d+(\.\d+)?s\)|[|/\\-])\s*$/;
+
+/**
+ * Command output as plain text for the model: escape sequences removed, `\r`
+ * progress redraws reduced to their final state, timer lines and repeats dropped.
+ */
+export function cleanTerminalOutput(text: string): string {
+  const out: string[] = [];
+  for (const raw of text.replace(ESCAPES, "").replace(/\r\n/g, "\n").split("\n")) {
+    const line = raw.includes("\r") ? raw.slice(raw.lastIndexOf("\r", raw.length - 2) + 1).replace(/\r$/, "") : raw;
+    if (PROGRESS.test(line)) continue;
+    if (line.trim() && line === out[out.length - 1]) continue;
+    out.push(line.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ""));
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
 /**
  * Shortens long command output to head + tail, keeping error lines from the
  * middle in full: they are what the repair step needs.
  */
 export function truncateOutput(text: string, maxLines = 120): string {
-  const lines = text.replace(/\r\n/g, "\n").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\n");
+  const lines = cleanTerminalOutput(text).split("\n");
   if (lines.length <= maxLines) return lines.join("\n");
   const head = Math.floor(maxLines * 0.3);
   const tail = Math.floor(maxLines * 0.45);

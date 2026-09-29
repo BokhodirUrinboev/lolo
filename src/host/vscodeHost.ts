@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import type { EditorContext } from "../context/collectors";
 import type { SymbolLocation } from "../context/mentions";
 import type { DiffReviewManager } from "../edit/diffView";
+import { cleanTerminalOutput } from "../tools/output";
 import { Approval, ApprovalRequest, CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, FileChange, Host, SourcePos, WriteOutcome } from "./types";
 
 export interface VsCodeHostOptions {
@@ -227,14 +228,15 @@ export class VsCodeHost implements Host {
     })();
     const exitCode = await exit;
     await Promise.race([read, new Promise((r) => setTimeout(r, 500))]);
-    output = output.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ""); // shell-integration OSC markers
+    output = cleanTerminalOutput(output); // shell-integration markers, colors, progress redraws
     this.lastTerminalOutput = output;
     return { exitCode, output, timedOut };
   }
 
   private async agentTerminal(): Promise<vscode.Terminal> {
     if (this.terminal && this.terminal.exitStatus === undefined) return this.terminal;
-    this.terminal = vscode.window.createTerminal({ name: "Agent Lolo", cwd: this.folder.uri, isTransient: true });
+    // MSBuild's terminal logger redraws progress lines, which the captured output turns into noise.
+    this.terminal = vscode.window.createTerminal({ name: "Agent Lolo", cwd: this.folder.uri, isTransient: true, env: { MSBUILDTERMINALLOGGER: "off" } });
     // A terminal that was never shown may not start its shell.
     this.terminal.show(true);
     // Shell integration activates asynchronously after the shell starts.
@@ -258,12 +260,13 @@ export class VsCodeHost implements Host {
   private runHidden(command: string, signal: AbortSignal | undefined, cwd: string, timeoutMs: number): Promise<CommandResult> {
     this.opts.output.appendLine(`$ ${command}  (shell integration unavailable; running hidden)`);
     return new Promise((resolve) => {
-      const p = spawn(command, { cwd, shell: true, signal, timeout: timeoutMs });
+      const p = spawn(command, { cwd, shell: true, signal, timeout: timeoutMs, env: { ...process.env, MSBUILDTERMINALLOGGER: "off" } });
       let output = "";
       p.stdout.on("data", (d) => (output += d));
       p.stderr.on("data", (d) => (output += d));
       p.on("error", (e) => resolve({ exitCode: -1, output: output + String(e) }));
       p.on("close", (code) => {
+        output = cleanTerminalOutput(output);
         this.lastTerminalOutput = output;
         resolve({ exitCode: code ?? -1, output });
       });

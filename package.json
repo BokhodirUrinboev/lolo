@@ -2,7 +2,7 @@
   "name": "agent-lolo",
   "displayName": "Agent Lolo",
   "description": "Local-first AI coding agent for small local models (Ollama, llama.cpp, LM Studio): chat, plan & edit with diff approvals, checkpoints, inline edit, autocomplete. Nothing leaves your machine.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "nodirbek",
   "license": "MIT",
   "engines": {
@@ -107,6 +107,11 @@
           "type": "boolean",
           "default": false,
           "description": "Apply edits without diff review (a checkpoint is still taken)."
+        },
+        "localAgent.autoRunCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the chat in \"Run everything\" mode: edits and terminal commands run without asking. Dangerous commands (rm -rf, sudo, git push --force, ...) are always blocked, and a checkpoint is taken before each run."
         },
         "localAgent.commandAllowlist": {
           "type": "array",
