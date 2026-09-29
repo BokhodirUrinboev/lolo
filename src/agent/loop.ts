@@ -16,6 +16,7 @@ import { formatDiagnostics } from "../tools/diagnostics";
 import { MEMORY_PATH, memoryText } from "../tools/memoryTool";
 import { ProcessManager } from "../tools/processes";
 import { codeStillUses } from "../tools/symbolTools";
+import { mentionsPath, stillReferenced } from "../tools/importPaths";
 import { EXTRACT_PROMPT } from "../tools/webTools";
 import type { WebConfig } from "../web/search";
 import { errorContext, failureReport } from "../tools/testReport";
@@ -157,6 +158,9 @@ function mcpSummary(tools: McpToolDef[]): string {
 
 /** Stop and ask the user after this many consecutive failed or invalid steps. */
 const MAX_CONSECUTIVE_FAILURES = 4;
+/** Tools whose written content the model wrote itself (so it has "seen" the file afterwards). */
+const MODEL_WRITES = new Set(["edit", "rewrite_file", "edit_lines", "create_file"]);
+
 /** A thought longer than this (characters) before any action is cut off; the schema allows THOUGHT_MAX. */
 const THOUGHT_ABORT = 1500;
 /** Consecutive reads (agent mode) after which the model is reminded to act. */
@@ -347,6 +351,13 @@ export class Agent {
       history.note(`Todo ${index + 1} was already done by renaming ${renamed[0]} to ${renamed[1]} everywhere.`);
       log?.write("todo_done", { index, summary: "already done by rename_symbol", auto: "rename" });
       return { ok: true, summary: `Already done: ${renamed[0]} was renamed to ${renamed[1]} everywhere.` };
+    }
+    // A later todo that updates the imports of a file move_file already moved (planners split "move X" into move + fix imports).
+    const moved = [...(ctx.moved ?? [])].find(([from]) => mentionsPath(todos[index], from));
+    if (moved && /\b(import|require|reference|usage|use|point|update|fix)/i.test(todos[index]) && !(await stillReferenced(ctx, moved[0]))) {
+      history.note(`Todo ${index + 1} was already done: move_file updated every import of ${moved[0]} (now ${moved[1]}).`);
+      log?.write("todo_done", { index, summary: "already done by move_file", auto: "move" });
+      return { ok: true, summary: `Already done: the imports of ${moved[0]} were updated when it moved to ${moved[1]}.` };
     }
     // Optional tool groups (git, file moves) are offered only to todos that mention them.
     // Questions are read-only already: explore would only add a second run.
@@ -558,7 +569,8 @@ export class Agent {
       ctx.thought = action.thought;
       const result = await tool.run(args, ctx);
       if (result.ok && (tool.name === "read_file" || tool.name === "read_symbol") && typeof args.path === "string") ctx.seen?.add(args.path);
-      result.changed?.forEach((f) => ctx.seen?.add(f));
+      // Only the model's own writes count as seen: files changed by code (import updates of a move) it hasn't seen.
+      if (MODEL_WRITES.has(tool.name)) result.changed?.forEach((f) => ctx.seen?.add(f));
       if (result.noop) {
         stats.editCalls--;
         stats.noopEdits++;
@@ -644,7 +656,7 @@ export class Agent {
       let longThought = false;
       const onToken = (delta: string) => {
         partial += delta;
-        if (!longThought && partial.length > THOUGHT_ABORT && !/"action"s*:|<tool/.test(partial)) {
+        if (!longThought && partial.length > THOUGHT_ABORT && !/"action"\s*:|<tool\b/.test(partial)) {
           const t = partialJsonString(partial, "thought") ?? (mode === "native" ? partial : "");
           if (t.length > THOUGHT_ABORT) {
             longThought = true;

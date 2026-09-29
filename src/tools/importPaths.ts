@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { FileChange, Host } from "../host/types";
+import { search } from "./search";
 import { filesWithWord } from "./symbolTools";
 import type { ToolContext } from "./types";
 
@@ -36,6 +37,41 @@ function specFor(importer: string, target: string, old: string): string {
 function pyModule(file: string): string | undefined {
   if (!file.endsWith(".py")) return undefined;
   return file.slice(0, -3).replace(/\/__init__$/, "").split("/").join(".");
+}
+
+/** The ways text refers to a file: `billing/utils.py`, `billing/utils`, `utils/format`, `billing.utils`. */
+function pathForms(file: string): string[] {
+  const noExt = file.replace(/\.[^./]+$/, "");
+  const parts = noExt.split("/");
+  const forms = [file, noExt];
+  if (parts.length >= 2) forms.push(parts.slice(-2).join("/"));
+  if (file.endsWith(".py") && parts.length >= 2) forms.push(noExt.replace(/\/__init__$/, "").split("/").join("."));
+  return [...new Set(forms)];
+}
+
+/** Whether `todo` names `file` (as a path, an import path or a Python module). */
+export function mentionsPath(todo: string, file: string): boolean {
+  return pathForms(file).some((f) => todo.includes(f));
+}
+
+/**
+ * Whether code still points at the old place of a moved file: its last two path segments
+ * (`utils/format`, as relative imports write it) or its Python module (`billing.utils`).
+ * A file at the root can't be told apart from other uses of its name: true (the model checks).
+ */
+export async function stillReferenced(ctx: ToolContext, from: string): Promise<boolean> {
+  const noExt = from.replace(/\.[^./]+$/, "");
+  const parts = noExt.split("/");
+  if (parts.length < 2) return true;
+  const needles = [parts.slice(-2).join("/"), ...(from.endsWith(".py") ? [parts.join(".")] : [])];
+  for (const query of needles) {
+    const r = await search.run({ query }, ctx);
+    if (!r.ok) return true;
+    if (r.output.startsWith("No matches")) continue;
+    const files = r.output.split("\n").map((l) => l.slice(0, Math.max(0, l.indexOf(":")))).filter((f) => /\.((c|m)?(j|t)sx?|py)$/.test(f));
+    if (files.length) return true;
+  }
+  return false;
 }
 
 /**

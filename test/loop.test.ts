@@ -122,6 +122,25 @@ describe("agent loop", () => {
     expect(r.status).toBe("done");
   });
 
+  it("completes a later 'fix the imports' todo that move_file already did, and keeps code-updated files unread", async () => {
+    const { root, read } = workspace({
+      "billing/__init__.py": "",
+      "billing/utils.py": "def fmt(c):\n    return c\n",
+      "billing/report.py": "from billing.utils import fmt\n\n\ndef line(c):\n    return fmt(c)\n",
+    });
+    const provider = new Scripted([
+      plan(["Move billing/utils.py to billing/money/format.py", "Edit every file that imports from billing/utils.py to import from billing/money/format.py"]),
+      act("move_file", { from: "billing/utils.py", to: "billing/money/format.py" }),
+      act("rewrite_file", { path: "billing/report.py", content: "from billing.money.format import fmt\n" }), // not seen: refused
+      act("done", { summary: "moved" }),
+    ]);
+    const r = await run(root, provider, "Move billing/utils.py to billing/money/format.py and update every import of it.");
+    expect(read("billing/report.py")).toBe("from billing.money.format import fmt\n\n\ndef line(c):\n    return fmt(c)\n");
+    expect(JSON.stringify(provider.seen[3])).toMatch(/haven't read billing\/report.py/);
+    expect(r.status).toBe("done");
+    expect(r.summary).toMatch(/Already done: the imports of billing\/utils.py were updated/);
+  });
+
   it("refuses to edit a file the model hasn't read in this task", async () => {
     const { root, read } = workspace({ "src/a.js": "exports.a = 1;\n" });
     const edit = act("edit", { path: "src/a.js", search: "exports.a = 1;", replace: "exports.a = 2;" });
