@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import * as path from "node:path";
-import { commandEnv, killTree, listenerPid, spawnCommand } from "../host/shell";
+import { commandEnv, killTree, listenerPid, listeningPorts, spawnCommand } from "../host/shell";
 import { decideCommand } from "./commandPolicy";
 import { truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
@@ -30,6 +30,8 @@ interface Proc {
   /** The port it was started for (start_process `port`), when it opened. */
   port?: number;
   stopped?: boolean;
+  /** Windows: ports in use before it started; the cleanup in stop() never touches those. */
+  portsBefore: Set<number>;
 }
 
 export class ProcessManager {
@@ -46,10 +48,11 @@ export class ProcessManager {
     return this.procs.get(id);
   }
 
-  start(command: string, cwd = "."): Proc {
+  async start(command: string, cwd = "."): Promise<Proc> {
+    const portsBefore = await listeningPorts(); // before spawning: a fast server would be in it already
     // Own process group (POSIX) / taskkill /T (Windows), so stop() also ends what the shell started.
     const child = spawnCommand(command, { cwd: path.join(this.root, cwd), env: commandEnv({ FORCE_COLOR: "0", NO_COLOR: "1", BROWSER: "none", CI: "1" }) });
-    const p: Proc = { id: this.nextId++, command, child, output: "", shown: 0 };
+    const p: Proc = { id: this.nextId++, command, child, output: "", shown: 0, portsBefore };
     const add = (d: Buffer) => {
       p.output += d.toString();
       if (p.output.length > MAX_BUFFER) {
@@ -94,9 +97,9 @@ export class ProcessManager {
       clearTimeout(t);
     }
     // Windows: a server started through Git Bash can sit outside the process tree taskkill
-    // walks; whatever still listens on the port it reported is it.
-    const port = p.port ?? Number(/:(\d+)$/.exec(listenUrl(p.output) ?? "")?.[1]);
-    const pid = port ? await listenerPid(port) : undefined;
+    // walks; whatever still listens on the local port it reported (and that was free before) is it.
+    const port = p.port ?? Number(/:(\d+)$/.exec(localListenUrl(p.output) ?? "")?.[1]);
+    const pid = port && !p.portsBefore.has(port) ? await listenerPid(port) : undefined;
     if (pid && pid !== process.pid) killTree(pid);
   }
 
@@ -121,9 +124,13 @@ function portOpen(port: number): Promise<boolean> {
 
 /** The address the server listens on; other URLs in the log (docs, advisories) don't count. */
 export function listenUrl(output: string): string | undefined {
-  const local = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\*|\+):\d+/.exec(output)?.[0];
-  const url = local ?? /https?:\/\/[\w.-]+:\d+/.exec(output)?.[0];
+  const url = localListenUrl(output) ?? /https?:\/\/[\w.-]+:\d+/.exec(output)?.[0];
   return url?.replace(/0\.0\.0\.0|\[::1?\]|\*|\+/, "localhost");
+}
+
+/** A local listening address in the log (localhost, 127.0.0.1, 0.0.0.0, [::], * or +), never a remote URL. */
+function localListenUrl(output: string): string | undefined {
+  return /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\*|\+):\d+/.exec(output)?.[0];
 }
 
 function tail(text: string, lines = 30): string {
@@ -164,7 +171,7 @@ export const startProcess: ToolDef<{ command: string; cwd?: string; port?: numbe
       }
     }
     for (const old of pm.running().filter((p) => p.command === a.command)) await pm.stop(old);
-    const p = pm.start(a.command, a.cwd);
+    const p = await pm.start(a.command, a.cwd);
     const state = await pm.waitReady(p, a.port, ctx.signal);
     p.shown = p.output.length;
     if (state === "exited") {

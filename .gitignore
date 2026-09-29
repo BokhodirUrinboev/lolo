@@ -6,3 +6,4 @@ dist/
 .agent/index/
 .agent/cache/
 eval/results/
+out/

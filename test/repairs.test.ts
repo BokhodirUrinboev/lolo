@@ -125,6 +125,12 @@ describe("replace that repeats the lines around search", () => {
     expect(r2("a.js")).toBe("function f(x) {\n  if (!x) return 0;\n  return x;\n}\n");
   });
 
+  it("doesn't treat a new function inserted above as a redefinition (short names)", async () => {
+    const { ctx, read } = workspace({ "a.js": "function f(x) {\n  return x;\n}\n" });
+    await editFile.run({ path: "a.js", search: "function f(x) {", replace: "function g() {\n  return 1;\n}\n\nfunction f(x) {" }, ctx);
+    expect(read("a.js")).toBe("function g() {\n  return 1;\n}\n\nfunction f(x) {\n  return x;\n}\n");
+  });
+
   it("accepts a one-line complete redefinition too", async () => {
     const { ctx, read } = workspace({ "SystemClock.cs": "namespace Greetings;\n\npublic class SystemClock\n{\n    public DateTime Now => DateTime.Now;\n}\n" });
     const r = await editFile.run({ path: "SystemClock.cs", search: "public class SystemClock", replace: "public class SystemClock : IClock { public DateTime Now => DateTime.Now; }" }, ctx);

@@ -268,7 +268,8 @@ async function redefinition(path: string, original: string, search: string, repl
   const r = toLf(replace).replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "");
   if (!def || s.split("\n").length >= def.endLine - def.line + 1) return undefined; // search already spans it
   const rLines = r.split("\n");
-  if (!rLines[0].includes(def.name) || !r.includes("{") || findImbalance(r)) return undefined;
+  const nameRe = new RegExp(`(?<![\\w$])${def.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`);
+  if (!nameRe.test(rLines[0]) || !r.includes("{") || findImbalance(r)) return undefined;
   const body = reindent(r, [rLines[0]], [lines[def.line - 1]]);
   const content = fromLf([...lines.slice(0, def.line - 1), ...body, ...lines.slice(def.endLine)].join("\n"), detectEol(original));
   if (await checkEditSyntax(path, original, content)) return undefined;

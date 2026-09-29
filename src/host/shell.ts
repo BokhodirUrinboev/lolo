@@ -160,11 +160,29 @@ export function listenerPid(port: number): Promise<number | undefined> {
 }
 
 export function parseListener(netstat: string, port: number): number | undefined {
+  return parseListeners(netstat).get(port);
+}
+
+/** port → pid of every listening TCP socket in `netstat -ano` output. */
+function parseListeners(netstat: string): Map<number, number> {
+  const out = new Map<number, number>();
   for (const line of netstat.split(/\r?\n/)) {
     const m = /^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line);
-    if (m && Number(m[1]) === port && Number(m[2]) > 0) return Number(m[2]);
+    if (m && Number(m[2]) > 0 && !out.has(Number(m[1]))) out.set(Number(m[1]), Number(m[2]));
   }
-  return undefined;
+  return out;
+}
+
+/** Windows: the ports something listens on now (a snapshot before a server starts, so we never stop what was already there). */
+export function listeningPorts(): Promise<Set<number>> {
+  if (process.platform !== "win32") return Promise.resolve(new Set());
+  return new Promise((resolve) => {
+    const p = spawn("netstat", ["-ano", "-p", "TCP"], { windowsHide: true });
+    let out = "";
+    p.stdout.on("data", (d) => (out += d));
+    p.on("error", () => resolve(new Set()));
+    p.on("close", () => resolve(new Set(parseListeners(out).keys())));
+  });
 }
 
 /** How the prompt tells the model which command syntax to use. */

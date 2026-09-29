@@ -1,5 +1,5 @@
-# ollama create lolo-coder -f scripts/finetune/Modelfile   (after train_lora.py)
-FROM ../../out/lolo-lora/gguf/unsloth.Q4_K_M.gguf
+# ollama create lolo-coder -q q4_K_M -f scripts/finetune/Modelfile   (after train_lora.py)
+FROM ../../out/lolo-lora/merged
 PARAMETER num_ctx 32768
 PARAMETER temperature 0.2
 TEMPLATE """{{- if .System }}<|im_start|>system
