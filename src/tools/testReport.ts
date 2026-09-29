@@ -183,6 +183,41 @@ export function formatTestFailures(failures: TestFailure[], limit = 10): string 
   return [`Failing tests (${failures.length}):`, ...rows, ...more].join("\n");
 }
 
+/** `file(line,col): error` (MSBuild, tsc), `file:line:col: ...` (Go, gcc, node, tsc --pretty false), `File "x.py", line N`. */
+const LOCATIONS = [
+  /^\s*(.+?\.(?:cs|fs|vb|tsx?))\((\d+),\d+\): error\b/gm,
+  /^\s*(?:\.\/)?([\w./\\:-]+?\.(?:go|[cm]?[jt]sx?|rs|c|cc|cpp|h|java|kt|py)):(\d+)(?::\d+)?:? /gm,
+  /File "([^"]+\.py)", line (\d+)/g,
+];
+
+/**
+ * The code around the first few error locations in `output`, numbered, for workspace files:
+ * the compiler names the line, but small models fix the line they were thinking of instead
+ * (a constructor, while the error is the field two lines above).
+ */
+export async function errorContext(output: string, root: string, read: (path: string) => Promise<string>, max = 3): Promise<string> {
+  const seen = new Set<string>();
+  const blocks: string[] = [];
+  for (const re of LOCATIONS) {
+    for (const m of output.matchAll(re)) {
+      if (blocks.length >= max) break;
+      const file = relativize(m[1].trim(), root);
+      if (/^([a-zA-Z]:)?\//.test(file) || /node_modules|site-packages|[\\/]lib[\\/]python/.test(file)) continue;
+      const line = Number(m[2]);
+      const key = `${file}:${line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const text = await read(file).catch(() => undefined);
+      if (text === undefined) continue;
+      const lines = text.replace(/\r\n/g, "\n").split("\n");
+      const from = Math.max(1, line - 2);
+      const to = Math.min(lines.length, line + 2);
+      blocks.push(`${file}:\n${lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(4)}${from + i === line ? " >" : " |"} ${l}`).join("\n")}`);
+    }
+  }
+  return blocks.length ? `\n\nCode at the errors:\n${blocks.join("\n")}` : "";
+}
+
 /**
  * Output of a failed command, shaped for the model: the parsed failure list first,
  * then a shortened log. Unrecognized output is only truncated.

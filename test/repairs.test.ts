@@ -12,6 +12,7 @@ import { resolveProfile } from "../src/providers/modelProfiles";
 import { createFile, doubleEscaped, editFile, rewriteFile } from "../src/tools/fileTools";
 import { addUsing, missingUsings, workspacePath } from "../src/tools/missingImports";
 import { relativizePaths } from "../src/tools/output";
+import { errorContext } from "../src/tools/testReport";
 import { ToolRegistry } from "../src/tools/registry";
 import type { ToolContext } from "../src/tools/types";
 
@@ -294,6 +295,27 @@ describe("missing using directives", () => {
     expect(r.changes[0].content).toBe("using System.Text.RegularExpressions;\n\nnamespace Demo;\n");
     expect(r.note).toContain("`using System.Text;` to src/Report.cs");
     expect(workspacePath("D:\\other\\A.cs", root)).toBeUndefined();
+  });
+});
+
+describe("errorContext", () => {
+  const greeter = "namespace Greetings;\n\npublic class Greeter\n{\n    private readonly SystemClock _clock;\n\n    public Greeter(IClock clock) => _clock = clock;\n}\n";
+  const files: Record<string, string> = { "Greeter.cs": greeter, "src/a.js": "const x = 1;\nfoo();\n", "app.py": "import os\nprint(y)\n" };
+  const read = async (p: string) => files[p] ?? Promise.reject(new Error("missing"));
+
+  it("shows the code around compiler errors, marking the line", async () => {
+    const root = "C:\\w";
+    const out = "C:\\w\\Greeter.cs(7,46): error CS0266: Cannot implicitly convert type 'IClock' to 'SystemClock' [C:\\w\\Clock.csproj]";
+    const ctx = await errorContext(out, root, read);
+    expect(ctx).toContain("Greeter.cs:");
+    expect(ctx).toContain("   5 |     private readonly SystemClock _clock;");
+    expect(ctx).toContain("   7 >     public Greeter(IClock clock) => _clock = clock;");
+  });
+
+  it("reads node and python locations, and skips files outside the workspace", async () => {
+    expect(await errorContext("ReferenceError: foo is not defined\n    at Object.<anonymous> (/w/src/a.js:2:1)\nsrc/a.js:2:1: nope", "/w", read)).toContain("   2 > foo();");
+    expect(await errorContext('  File "/w/app.py", line 2, in <module>\nNameError: y', "/w", read)).toContain("   2 > print(y)");
+    expect(await errorContext('  File "/usr/lib/python3.12/json/__init__.py", line 9', "/w", read)).toBe("");
   });
 });
 

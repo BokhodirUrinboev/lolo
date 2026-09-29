@@ -18,7 +18,7 @@ import { ProcessManager } from "../tools/processes";
 import { codeStillUses } from "../tools/symbolTools";
 import { EXTRACT_PROMPT } from "../tools/webTools";
 import type { WebConfig } from "../web/search";
-import { failureReport } from "../tools/testReport";
+import { errorContext, failureReport } from "../tools/testReport";
 import { missingUsings } from "../tools/missingImports";
 import { relativizePaths } from "../tools/output";
 import type { McpHub, McpToolDef } from "../mcp/hub";
@@ -705,7 +705,8 @@ export class Agent {
       }
       const layout = r.exitCode !== 0 && /\bdotnet\b/.test(cmd) ? nestedProjectProblem(await listFiles(host)) : undefined;
       const body = relativizePaths(r.exitCode === 0 ? r.output : failureReport(r.output, host.root, 80), host.root);
-      const output = `${fixed}$ ${cmd}\nexit code ${r.exitCode}\n${body}${layout ? `\n\nLikely cause: ${layout}` : ""}`;
+      const where = r.exitCode === 0 ? "" : await errorContext(r.output, host.root, (p) => host.readFile(p));
+      const output = `${fixed}$ ${cmd}\nexit code ${r.exitCode}\n${body}${where}${layout ? `\n\nLikely cause: ${layout}` : ""}`;
       emit({ type: "verify", ok: r.exitCode === 0, output });
       if (r.exitCode !== 0) return output;
     }

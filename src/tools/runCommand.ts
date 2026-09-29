@@ -5,7 +5,7 @@ import { missingUsings } from "./missingImports";
 import { relativizePaths, truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
 import { startProcess } from "./processes";
-import { failureReport } from "./testReport";
+import { errorContext, failureReport } from "./testReport";
 import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
 
 export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
@@ -89,7 +89,10 @@ async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Pr
   // Generators (dotnet new, npm create) decide the layout; show it so later steps use real paths.
   const created = (await listFiles(ctx.host)).filter((f) => !before.has(f)).sort();
   const newFiles = created.length ? `\nNew files (${created.length}): ${created.slice(0, 20).join(", ")}${created.length > 20 ? ", ..." : ""}` : "";
-  const out = fixed + relativizePaths(r.exitCode === 0 ? truncateOutput(r.output) : failureReport(r.output, ctx.host.root), ctx.host.root);
+  const out =
+    fixed +
+    relativizePaths(r.exitCode === 0 ? truncateOutput(r.output) : failureReport(r.output, ctx.host.root), ctx.host.root) +
+    (r.exitCode === 0 ? "" : await errorContext(r.output, ctx.host.root, (p) => ctx.host.readFile(p)));
   const where = a.cwd && a.cwd !== "." ? ` (in ${a.cwd})` : "";
   const timeout = r.timedOut
     ? "\n[Timed out after 2 minutes and was stopped. Servers and watchers never finish; check your work with a build or tests instead.]"
