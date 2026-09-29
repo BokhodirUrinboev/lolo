@@ -110,6 +110,20 @@ export function dropLookOnlyTodos(todos: string[], goal: string): string[] {
   return kept.length ? kept : [goal || todos[0]];
 }
 
+const TEST_TODO = /^(test|verify|validate|check|ensure)\b|\b(write|add|create)\s+(a\s+|some\s+|the\s+)?(unit\s+)?tests?\b|\bunit tests?\b/i;
+const ASKS_FOR_CHECKS = /\b(tests?|specs?|verify|check|curl|validate)\b/i;
+
+/**
+ * Test and verification todos the user didn't ask for ("Test equality with unit tests"):
+ * project checks run by themselves, and a 7B model adds an xUnit file to a console project
+ * and breaks its build. Kept when the message mentions tests or checking.
+ */
+export function dropUnaskedTestTodos(todos: string[], message: string): string[] {
+  if (ASKS_FOR_CHECKS.test(message)) return todos;
+  const kept = todos.filter((t) => !TEST_TODO.test(t.trim()));
+  return kept.length ? kept : todos;
+}
+
 const sameFile = (a: string, b: string) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
 
 /**
@@ -150,6 +164,6 @@ export async function makePlan(provider: LLMProvider, prefix: ChatMessage[], sig
   if (kind === "chat" && !reply) kind = kinds.includes("question") ? "question" : "chat"; // nothing to show: answer it properly
   if (kind === "chat" && !reply) reply = "Could you say a bit more about what you'd like me to do?";
   if (kind === "task" && !todos.length) todos = [goal || "Complete the task"];
-  todos = kind === "task" ? dropLookOnlyTodos(mergeTodos(todos), goal).slice(0, 6) : todos;
+  todos = kind === "task" ? dropUnaskedTestTodos(dropLookOnlyTodos(mergeTodos(todos), goal), message).slice(0, 6) : todos;
   return { kind, reply, goal, todos, messages: [request, { role: "assistant", content: JSON.stringify({ goal, kind, reply, todos }) }] };
 }

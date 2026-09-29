@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { laterTodoFor } from "../src/agent/loop";
-import { dropLookOnlyTodos, mergeTodos, namedFiles } from "../src/agent/planner";
+import { dropLookOnlyTodos, dropUnaskedTestTodos, mergeTodos, namedFiles } from "../src/agent/planner";
 import { isTestFile, protectTests } from "../src/agent/testGuard";
 import { EditState } from "../src/edit/formats";
 import { fuzzyApply } from "../src/edit/fuzzyApply";
@@ -271,6 +271,14 @@ describe("mergeTodos", () => {
     expect(dropLookOnlyTodos(["Find and fix the null check in src/a.js"], "g")).toEqual(["Find and fix the null check in src/a.js"]);
     expect(dropLookOnlyTodos(["Read src/a.js", "Review src/b.js"], "Explain the code")).toEqual(["Explain the code"]);
     expect(dropLookOnlyTodos(["Check the /health endpoint with curl"], "g")).toEqual(["Check the /health endpoint with curl"]);
+  });
+
+  it("drops test todos the user didn't ask for", () => {
+    const todos = ["Override Equals and GetHashCode in Money.cs", "Test equality logic with unit tests"];
+    expect(dropUnaskedTestTodos(todos, "Two Money values with the same Amount must be equal.")).toEqual([todos[0]]);
+    expect(dropUnaskedTestTodos(["Add applyDiscount to Cart", "Add a test for it in test/cart.test.js"], "Add applyDiscount. Add a test for it.")).toHaveLength(2);
+    expect(dropUnaskedTestTodos(["Add /health", "Check /health with curl"], "Add /health, then check it with curl")).toHaveLength(2);
+    expect(dropUnaskedTestTodos(["Verify the build"], "Fix the typo")).toEqual(["Verify the build"]); // never empty
   });
 
   it("keeps todos about different or several files apart", () => {
