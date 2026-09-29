@@ -2,13 +2,14 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { laterTodoFor } from "../src/agent/loop";
 import { mergeTodos, namedFiles } from "../src/agent/planner";
 import { isTestFile, protectTests } from "../src/agent/testGuard";
 import { EditState } from "../src/edit/formats";
 import { fuzzyApply } from "../src/edit/fuzzyApply";
 import { NodeHost } from "../src/host/nodeHost";
 import { resolveProfile } from "../src/providers/modelProfiles";
-import { createFile, editFile } from "../src/tools/fileTools";
+import { createFile, doubleEscaped, editFile } from "../src/tools/fileTools";
 import { addUsing, missingUsings, workspacePath } from "../src/tools/missingImports";
 import { relativizePaths } from "../src/tools/output";
 import { ToolRegistry } from "../src/tools/registry";
@@ -127,6 +128,40 @@ describe("replace that repeats the lines around search", () => {
     const { ctx, read } = workspace({ "b.js": "function f() {\n  a();\n}\n" });
     await editFile.run({ path: "b.js", search: "  a();", replace: "  a();\n  a();" }, ctx);
     expect(read("b.js")).toBe("function f() {\n  a();\n  a();\n}\n");
+  });
+});
+
+describe("line breaks escaped twice", () => {
+  it("unescapes search/replace when only the unescaped search is in the file", async () => {
+    const { ctx, read } = workspace({ "src/stack.js": "class S {\n  pop() {\n    return this.items.shift();\n  }\n}\n" });
+    const r = await editFile.run({ path: "src/stack.js", search: "  pop() {\\n    return this.items.shift();\\n  }", replace: "  pop() {\\n    return this.items.pop();\\n  }" }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("escaped twice");
+    expect(read("src/stack.js")).toBe("class S {\n  pop() {\n    return this.items.pop();\n  }\n}\n");
+  });
+
+  it("fixes new content, but not a one-line \"\\n\" inside a string", async () => {
+    expect(doubleEscaped("function f() {\\n  return 1;\\n}")).toBe(true);
+    expect(doubleEscaped('return lines.join("\\n");')).toBe(false);
+    expect(doubleEscaped("a\nb\\n  c\\n  d")).toBe(false); // has real line breaks
+    const { ctx, read } = workspace({});
+    const args = { path: "a.js", content: "function f() {\\n  return 1;\\n}\\n" };
+    expect(await createFile.check!(args, ctx)).toBeUndefined();
+    await createFile.run(args, ctx);
+    expect(read("a.js")).toBe("function f() {\n  return 1;\n}\n");
+  });
+});
+
+describe("checks deferred to a later todo", () => {
+  const build = "Program.cs(3,31): error CS1503: Argument 1: cannot convert from 'Greetings.SystemClock' to 'Greetings.IClock' [Clock.csproj]";
+  it("defers when the errors name what a later todo changes", () => {
+    expect(laterTodoFor(build, ["Edit SystemClock.cs so SystemClock implements IClock"])).toBe("Edit SystemClock.cs so SystemClock implements IClock");
+    expect(laterTodoFor("ReferenceError: computeTax is not defined\n    at orderTotal (src/order.js:4:15)", ["Use computeTax in src/invoice.js"])).toBeDefined();
+  });
+  it("does not defer for unrelated errors or on the last todo", () => {
+    expect(laterTodoFor(build, ["Add a README section"])).toBeUndefined();
+    expect(laterTodoFor(build, [])).toBeUndefined();
+    expect(laterTodoFor("AssertionError: Expected values to be strictly equal", ["Handle the AssertionError case"])).toBeUndefined();
   });
 });
 

@@ -42,7 +42,7 @@ describe("agent loop", () => {
   it("stops an identical edit that was already applied instead of repeating it forever", async () => {
     const { root, read } = workspace({ "a.txt": "one\n" });
     const append = act("edit", { path: "a.txt", search: "one", replace: "one\ntwo" });
-    const provider = new Scripted([plan(["Add a line two after one in a.txt"]), append, append, append, append, append]);
+    const provider = new Scripted([plan(["Add a line two after one in a.txt"]), act("read_file", { path: "a.txt" }), append, append, append, append, append]);
     const r = await run(root, provider, "Add a line two after one in a.txt");
     expect(read("a.txt")).toBe("one\ntwo\n");
     expect(r.status).toBe("failed"); // stuck: nobody to ask in a headless run
@@ -74,7 +74,9 @@ describe("agent loop", () => {
     const { root, read } = workspace({ "src/a.js": "exports.two = () => 3;\n", "test/a.test.js": "// expects 2\n" });
     const provider = new Scripted([
       plan(["Fix src/a.js so the tests pass"]),
+      act("read_file", { path: "test/a.test.js" }),
       act("edit", { path: "test/a.test.js", search: "// expects 2", replace: "// expects 3" }),
+      act("read_file", { path: "src/a.js" }),
       act("edit", { path: "src/a.js", search: "() => 3", replace: "() => 2" }),
       act("done", { summary: "fixed" }),
     ]);
@@ -82,6 +84,16 @@ describe("agent loop", () => {
     expect(read("test/a.test.js")).toBe("// expects 2\n");
     expect(read("src/a.js")).toBe("exports.two = () => 2;\n");
     expect(r.status).toBe("done");
-    expect(JSON.stringify(provider.seen[2])).toMatch(/is a test/);
+    expect(JSON.stringify(provider.seen[3])).toMatch(/is a test/);
+  });
+
+  it("refuses to edit a file the model hasn't read in this task", async () => {
+    const { root, read } = workspace({ "src/a.js": "exports.a = 1;\n" });
+    const edit = act("edit", { path: "src/a.js", search: "exports.a = 1;", replace: "exports.a = 2;" });
+    const provider = new Scripted([plan(["Set a to 2 in src/a.js"]), edit, act("read_file", { path: "src/a.js" }), edit, act("done", { summary: "ok" })]);
+    const r = await run(root, provider, "Set a to 2 in src/a.js");
+    expect(JSON.stringify(provider.seen[2])).toMatch(/haven't read src\/a.js/);
+    expect(read("src/a.js")).toBe("exports.a = 2;\n");
+    expect(r.status).toBe("done");
   });
 });

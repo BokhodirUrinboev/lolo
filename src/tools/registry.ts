@@ -32,6 +32,9 @@ export const ALL_TOOLS: ToolDef[] = [
   done, answer,
 ];
 
+/** Tools that change an existing file's lines: the model must have seen the file first. */
+const EDITS_EXISTING = new Set(["edit", "rewrite_file", "edit_lines"]);
+
 export interface Action {
   thought: string;
   tool: string;
@@ -147,6 +150,10 @@ export class ToolRegistry {
       if ("error" in r) return { ok: false, error: r.error };
       if (tool.kind === "write" && writeForbidden(r.path)) return { ok: false, error: `Writing to ${r.path} is not allowed.` };
       args.path = r.path;
+    }
+    // Read before edit (as in Claude Code): models guess the lines of files they haven't seen.
+    if (ctx.seen && EDITS_EXISTING.has(tool.name) && typeof args.path === "string" && !ctx.seen.has(args.path) && (await ctx.host.stat(args.path)) === "file") {
+      return { ok: false, error: `You haven't read ${args.path} in this task. Read it first (read_file), then change it using its exact lines.` };
     }
     // "The tests fail, fix it": existing tests stay as they are (see agent/testGuard.ts).
     const target = typeof args.path === "string" ? args.path : typeof args.from === "string" ? args.from : undefined;

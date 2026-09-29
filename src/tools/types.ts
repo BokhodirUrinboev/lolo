@@ -38,6 +38,8 @@ export interface ToolContext {
   thought?: string;
   /** The user's message is about failing tests (or forbids changing them): existing test files are read-only. */
   protectTests?: boolean;
+  /** Files the model has seen this run (read, written, or given in the task): only these may be edited. Unset: no check. */
+  seen?: Set<string>;
   /** Renames done by rename_symbol in this run (old → new): later todos about the same rename are already done. */
   renamed?: Map<string, string>;
 }

@@ -129,6 +129,23 @@ export function commandTodo(todo: string, command: string): boolean {
   return !/\b(then|and|also|after|edit|update|implement|write|change|fix)\b/i.test(rest);
 }
 
+/**
+ * The later todo the failing checks are about, if any: a name from the error lines
+ * (`SystemClock`, `IClock`, `computeTax`, `Program.cs`) that a later todo mentions. Only
+ * code-like names count: an inner capital (camelCase, PascalCase with two capitals),
+ * snake_case, or a source file name; error/exception class names don't.
+ */
+export function laterTodoFor(failure: string, later: string[]): string | undefined {
+  if (!later.length) return undefined;
+  const errorLines = failure.split("\n").filter((l) => /error|fail|✖|×|Traceback|Exception/i.test(l));
+  const codeName = (w: string) =>
+    w.length >= 4 &&
+    !/(Error|Exception|Warning)$/.test(w) &&
+    (/\.(cs|tsx?|jsx?|mjs|cjs|py|go|java|rs|rb|php|kt)$/.test(w) || (/[A-Z]/.test(w.slice(1)) && /[a-z]/.test(w)) || /[a-z]_[a-z]/i.test(w));
+  const names = new Set(errorLines.flatMap((l) => l.match(/[A-Za-z_]\w*(?:\.(?:cs|tsx?|jsx?|mjs|cjs|py|go|java|rs|rb|php|kt)\b)?/g) ?? []).filter(codeName));
+  return later.find((t) => [...names].some((n) => new RegExp(`(?<![\\w.])${n.replace(/[.$]/g, "\\$&")}(?![\\w])`).test(t)));
+}
+
 /** "server: tool, tool" per MCP server, for the system prompt. */
 function mcpSummary(tools: McpToolDef[]): string {
   const byServer = new Map<string, string[]>();
@@ -267,6 +284,8 @@ export class Agent {
       const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: this.deps.commandAllowlist, signal, readOnly: execMode === "ask", processes, semantic,
         web: this.deps.web,
         protectTests: protectTests(task),
+        // @-mentioned files are in the task message; everything else must be read before it is edited.
+        seen: new Set(mentions.files),
         largeRepo: !this.deps.nested && (await listFiles(host)).filter((f) => languageFor(f)).length >= LARGE_REPO_FILES,
         explore: this.deps.nested ? undefined : (question, sig) => this.explore(question, emit, sig),
         extract: (text, question, sig) => this.extract(text, question, stats, sig),
@@ -494,6 +513,15 @@ export class Agent {
         const checks = changedInTodo ? (s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host)) : [];
         if (checks.length) {
           const failed = await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f)));
+          // Mid-plan, the build may not pass yet: Greeter takes an IClock (todo 1) before SystemClock
+          // implements it (todo 2). When the errors are about what a later todo does, check after that one.
+          const later = failed ? laterTodoFor(failed, todos.slice(index + 1)) : undefined;
+          if (failed && later !== undefined) {
+            log?.write("verify", { ok: false, deferred: later });
+            history.add(assistant, `Todo complete. The checks don't pass yet, but the errors are about what a later todo does ("${later}"); they run again after it.`, `done: ${summary.slice(0, 120)} (checks deferred)`);
+            log?.write("todo_done", { index, summary, deferred: true });
+            return { ok: true, summary };
+          }
           if (failed) {
             repairs++;
             lastFailure = step;
@@ -517,6 +545,8 @@ export class Agent {
       }
       ctx.thought = action.thought;
       const result = await tool.run(args, ctx);
+      if (result.ok && (tool.name === "read_file" || tool.name === "read_symbol") && typeof args.path === "string") ctx.seen?.add(args.path);
+      result.changed?.forEach((f) => ctx.seen?.add(f));
       if (result.noop) {
         stats.editCalls--;
         stats.noopEdits++;

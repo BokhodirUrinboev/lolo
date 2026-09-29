@@ -208,6 +208,28 @@ export const listDir: ToolDef<{ path?: string }> = {
 };
 
 /**
+ * Line breaks the model escaped twice in its JSON (`"pop() {\\n    return x;\\n}"`): the text
+ * then holds `\n` as two characters and nothing matches or parses. Only for text without a
+ * real line break and several `\n` before indentation or a bracket (not a `"\n"` in a string).
+ */
+export function doubleEscaped(s: string): boolean {
+  return !s.includes("\n") && (s.match(/\\n(?=[ \t}\])]|\\n|$)/g) ?? []).length >= 2;
+}
+
+const unescapeBreaks = (s: string) => s.replace(/\\r\\n|\\n/g, "\n").replace(/\\t/g, "\t");
+const escaped = new WeakSet<object>();
+
+/** `content` escaped twice: fixed in place (checks run before run()). */
+function fixEscapes(a: { content: string }) {
+  if (!doubleEscaped(a.content)) return;
+  a.content = unescapeBreaks(a.content);
+  escaped.add(a);
+}
+
+const escapeNote = (a: object) => (escaped.has(a) ? ESCAPE_NOTE : "");
+const ESCAPE_NOTE = " (your line breaks were escaped twice as \\\\n; they were turned into real line breaks)";
+
+/**
  * A `// existing implementation` / `// ... rest of the code` line that `before` doesn't have:
  * in new code it is a hole, not code (a moved function written as a stub). Error text, or undefined.
  */
@@ -302,6 +324,17 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
     const original = await ctx.host.readFile(a.path);
     let r = fuzzyApply(original, a.search, a.replace, { all: a.all });
     let where = "";
+    // `search` with `\n` typed as text: when its unescaped form is in the file, the model escaped twice.
+    if (!r.ok && !r.matches && !a.search.includes("\n") && a.search.includes("\\n")) {
+      const search = unescapeBreaks(a.search);
+      const replace = a.replace.includes("\n") ? a.replace : unescapeBreaks(a.replace);
+      const retry = fuzzyApply(original, search, replace, { all: a.all });
+      if (retry.ok || retry.matches) {
+        Object.assign(a, { search, replace });
+        r = retry;
+        where = ESCAPE_NOTE;
+      }
+    }
     // Several matches: the ones inside the function the todo (or the model's thought) names are meant.
     const context = `${ctx.todo ?? ""}\n${ctx.thought ?? ""}`;
     const named = (d: Def | undefined) => !!d && new RegExp(`(?<![\\w$])${d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`).test(context);
@@ -369,6 +402,7 @@ export const rewriteFile: ToolDef<{ path: string; content: string }> = {
   description: "Replace the entire content of an existing small file. Write the complete file: never use placeholders like `// ... existing code ...`.",
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
+    fixEscapes(a);
     return (await mustBeFile(a.path, ctx)) ?? mustUse("rewrite_file", a.path, ctx);
   },
   async run(a, ctx) {
@@ -376,7 +410,7 @@ export const rewriteFile: ToolDef<{ path: string; content: string }> = {
     const merged = mergeLazyRewrite(original, a.content);
     if (!merged.ok) return fail(merged.reason, `rewrite_file ${a.path}: placeholders could not be merged`);
     const note = merged.filled ? ` (${merged.filled} "existing code" placeholder(s) were filled from the original)` : "";
-    return write(ctx, a.path, merged.content, false, `rewrite_file ${a.path}`, note);
+    return write(ctx, a.path, merged.content, false, `rewrite_file ${a.path}`, note + escapeNote(a));
   },
 };
 
@@ -395,12 +429,13 @@ export const editLines: ToolDef<{ path: string; start_line: number; end_line: nu
     required: ["path", "start_line", "end_line", "content"],
   },
   async check(a, ctx) {
+    fixEscapes(a);
     return (await mustBeFile(a.path, ctx)) ?? mustUse("edit_lines", a.path, ctx);
   },
   async run(a, ctx) {
     const r = applyLineRange(await ctx.host.readFile(a.path), a.start_line, a.end_line, a.content);
     if (!r.ok) return fail(`edit_lines failed: ${r.reason}`);
-    return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${a.start_line}-${a.end_line}`, "", a.content);
+    return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${a.start_line}-${a.end_line}`, escapeNote(a), a.content);
   },
 };
 
@@ -410,6 +445,7 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
   description: "Create a new file (parent folders are created). Fails if the file exists.",
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
+    fixEscapes(a);
     if (await ctx.host.stat(a.path)) return `"${a.path}" already exists. Use edit to change it.`;
     const base = a.path.split("/").pop()!;
     if (/^\.(slnx?|csproj|fsproj|cs|py|js|ts|tsx|json|go|rs|java)$/.test(base)) {
@@ -423,5 +459,5 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
     }
     return placeholderIn(a.content, "", a.path);
   },
-  run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`),
+  run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`, escapeNote(a)),
 };
