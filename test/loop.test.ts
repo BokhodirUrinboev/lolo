@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { Agent } from "../src/agent/loop";
+import { Agent, repeatsLine } from "../src/agent/loop";
 import { NodeHost } from "../src/host/nodeHost";
 import { resolveProfile } from "../src/providers/modelProfiles";
 import type { ChatMessage, ChatRequest, LLMProvider } from "../src/providers/types";
@@ -139,6 +139,17 @@ describe("agent loop", () => {
     expect(JSON.stringify(provider.seen[3])).toMatch(/haven't read billing\/report.py/);
     expect(r.status).toBe("done");
     expect(r.summary).toMatch(/Already done: the imports of billing\/utils.py were updated/);
+  });
+
+  it("stops a reply that repeats one line over and over", async () => {
+    expect(repeatsLine(`{"content":"a\\n${'    .Replace(" ", "-")\\n'.repeat(20)}`)).toBe(true);
+    expect(repeatsLine("a\nb\n".repeat(20))).toBe(false);
+    expect(repeatsLine("}\n".repeat(30))).toBe(false); // too short to mean anything
+    const { root } = workspace({ "a.js": "let a = 1;\n" });
+    const loop = JSON.stringify({ thought: "rewrite", action: { tool: "rewrite_file", args: { path: "a.js", content: `let a = 1${'.replace(" ", "-")\n'.repeat(40)}` } } });
+    const provider = new Scripted([plan(["Change a.js"]), act("read_file", { path: "a.js" }), loop, act("done", { summary: "ok" })]);
+    await run(root, provider, "Change a.js");
+    expect(JSON.stringify(provider.seen.at(-1))).toMatch(/degenerated into repeating itself/);
   });
 
   it("refuses to edit a file the model hasn't read in this task", async () => {

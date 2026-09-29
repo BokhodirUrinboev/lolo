@@ -158,6 +158,17 @@ function mcpSummary(tools: McpToolDef[]): string {
 
 /** Stop and ask the user after this many consecutive failed or invalid steps. */
 const MAX_CONSECUTIVE_FAILURES = 4;
+/**
+ * Whether the reply so far ends with the same line many times in a row. Lines are split on
+ * real line breaks and on `\n` escapes, since file content inside the JSON reply is escaped.
+ */
+export function repeatsLine(text: string, times = 16): boolean {
+  const lines = text.split(/\\n|\n/).slice(0, -1); // the last one may still be growing
+  if (lines.length < times) return false;
+  const tail = lines.slice(-times);
+  return tail[0].trim().length >= 3 && tail.every((l) => l === tail[0]);
+}
+
 /** Tools whose written content the model wrote itself (so it has "seen" the file afterwards). */
 const MODEL_WRITES = new Set(["edit", "rewrite_file", "edit_lines", "create_file"]);
 
@@ -654,12 +665,22 @@ export class Agent {
       // A thought that keeps growing before any action (qwen3.5 reasoning until the token limit) is stopped early.
       const guard = new AbortController();
       let longThought = false;
+      // A reply that repeats one line over and over (qwen3.5 wrote `.Replace(" ", "-")` until the token limit).
+      let looping = false;
+      let checkedAt = 0;
       const onToken = (delta: string) => {
         partial += delta;
         if (!longThought && partial.length > THOUGHT_ABORT && !/"action"\s*:|<tool\b/.test(partial)) {
           const t = partialJsonString(partial, "thought") ?? (mode === "native" ? partial : "");
           if (t.length > THOUGHT_ABORT) {
             longThought = true;
+            guard.abort();
+          }
+        }
+        if (!looping && partial.length - checkedAt > 400) {
+          checkedAt = partial.length;
+          if (repeatsLine(partial)) {
+            looping = true;
             guard.abort();
           }
         }
@@ -684,7 +705,7 @@ export class Agent {
         const call = res.toolCalls?.[0];
         return call ? { ...res, content: JSON.stringify({ thought: res.content.trim(), action: { tool: call.name, args: call.arguments } }) } : res;
       } catch (e) {
-        if (longThought && !signal?.aborted) return { content: "", degenerate: true, longThought: true };
+        if ((longThought || looping) && !signal?.aborted) return { content: "", degenerate: true, longThought };
         const retryable = e instanceof ProviderError && e.status === undefined && !signal?.aborted;
         if (!retryable) throw e;
         // Still degenerate after retries: not fatal. An empty reply becomes an invalid step with advice.
