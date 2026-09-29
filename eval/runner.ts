@@ -356,11 +356,19 @@ function exportDataset(argv: string[]) {
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { out: { type: "string", default: "dataset.jsonl" }, "include-failed": { type: "boolean", default: false } },
+    options: {
+      out: { type: "string", default: "dataset.jsonl" },
+      "include-failed": { type: "boolean", default: false },
+      // Tasks (ids, comma-separated substrings) kept out of the dataset, so the eval can measure them fairly.
+      exclude: { type: "string", default: "" },
+    },
   });
+  const excluded = values.exclude!.split(",").map((x) => x.trim()).filter(Boolean);
   const files = positionals.flatMap((p) => {
     const dir = existsSync(path.join(p, "trajectories")) ? path.join(p, "trajectories") : p;
-    return readdirSync(dir).filter((f) => f.endsWith(".jsonl")).map((f) => path.join(dir, f));
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl") && !excluded.some((x) => f.startsWith(`${x}-`) || f.includes(x)))
+      .map((f) => path.join(dir, f));
   });
   const out: string[] = [];
   for (const file of files) {
@@ -399,6 +407,6 @@ if (cmd === "run") {
 } else if (cmd === "export") {
   exportDataset(rest);
 } else {
-  console.error("usage: eval run [--filter id] [--model m] [--runs n] | eval validate [--filter id] | eval fim [--model m] [--n 40] [--cpu] | eval export [--out dataset.jsonl] <results dir...>");
+  console.error("usage: eval run [--filter id] [--model m] [--runs n] | eval validate [--filter id] | eval fim [--model m] [--n 40] [--cpu] | eval export [--out dataset.jsonl] [--exclude id,id] <results dir...>");
   process.exit(2);
 }

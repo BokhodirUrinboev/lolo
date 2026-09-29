@@ -78,6 +78,20 @@ export async function checkEditSyntax(path: string, before: string | undefined, 
   return `This change would introduce a syntax error (${problem}). The file was NOT changed.${view ? `\n${view}\n` : " "}Re-read the file and make an edit that keeps the code valid.`;
 }
 
+/**
+ * Rewrites for syntax mistakes small models repeat, tried when a write doesn't parse; the
+ * caller keeps one only if it parses. C#: a file-scoped `namespace X;` followed by a braced
+ * block (the two namespace styles mixed up) becomes `namespace X { ... }`.
+ */
+export function syntaxRepairs(path: string, text: string): { text: string; note: string }[] {
+  const out: { text: string; note: string }[] = [];
+  if (/\.cs$/i.test(path)) {
+    const m = /^([ \t]*namespace[ \t]+[\w.]+)[ \t]*;([ \t]*\r?\n[ \t]*\{)/m.exec(text);
+    if (m) out.push({ text: text.slice(0, m.index) + m[1] + m[2] + text.slice(m.index + m[0].length), note: "`namespace X;` can't be followed by braces, so it became `namespace X { ... }`" });
+  }
+  return out;
+}
+
 /** The would-be file around the error line, numbered, so the model sees e.g. a duplicated `});`. */
 function around(text: string, problem: string): string {
   const line = Number(/^line (\d+)/.exec(problem)?.[1]);

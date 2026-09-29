@@ -91,6 +91,20 @@ function foldCode(todos: string[]): string[] {
   return out;
 }
 
+const LOOK_ONLY = /^(read|review|identify|locate|find|understand|analy[sz]e|inspect|examine|investigate|look\s+(at|into|for)|search|open|explore|study)\b/i;
+/** A change verb (not the noun: "identify the change that broke it"). */
+const CHANGES = /(?<!\b(the|a|an|this|that|my|your|each|every|specific)\s+)\b(fix|change|update|add|remove|implement|replace|rename|move|create|write|edit|make|set|refactor|convert|delete|extract|use|return|handle)\b/i;
+
+/**
+ * Todos that only look ("Read the changes with git diff", "Identify the change that broke
+ * the tests", "Locate the test") are dropped: reading happens inside the todo that changes
+ * something, and a separate looking todo makes small models redo (or undo) earlier work.
+ */
+export function dropLookOnlyTodos(todos: string[], goal: string): string[] {
+  const kept = todos.filter((t) => !LOOK_ONLY.test(t.trim()) || CHANGES.test(t));
+  return kept.length ? kept : [goal || todos[0]];
+}
+
 const sameFile = (a: string, b: string) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
 
 /**
@@ -131,6 +145,6 @@ export async function makePlan(provider: LLMProvider, prefix: ChatMessage[], sig
   if (kind === "chat" && !reply) kind = kinds.includes("question") ? "question" : "chat"; // nothing to show: answer it properly
   if (kind === "chat" && !reply) reply = "Could you say a bit more about what you'd like me to do?";
   if (kind === "task" && !todos.length) todos = [goal || "Complete the task"];
-  todos = mergeTodos(todos).slice(0, 6);
+  todos = kind === "task" ? dropLookOnlyTodos(mergeTodos(todos), goal).slice(0, 6) : todos;
   return { kind, reply, goal, todos, messages: [request, { role: "assistant", content: JSON.stringify({ goal, kind, reply, todos }) }] };
 }

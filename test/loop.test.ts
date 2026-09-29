@@ -87,6 +87,26 @@ describe("agent loop", () => {
     expect(JSON.stringify(provider.seen[3])).toMatch(/is a test/);
   });
 
+  it("defers mid-plan checks to the todo they are about, and runs them there even without changes", async () => {
+    const check = 'const t = require("fs").readFileSync("app.txt", "utf8");\nif (!t.includes("implements")) { console.error("error CS0535: SystemClock does not implement IClock"); process.exit(1); }\n';
+    const { root, read } = workspace({ ".agent/rules.md": "- verify: node check.js\n", "check.js": check, "app.txt": "Greeter(SystemClock)\n" });
+    const todos = ["Make Greeter take an IClock in app.txt", "Make SystemClock implement IClock"];
+    const provider = new Scripted([
+      plan(todos),
+      act("read_file", { path: "app.txt" }),
+      act("edit", { path: "app.txt", search: "Greeter(SystemClock)", replace: "Greeter(IClock)" }),
+      act("done", { summary: "Greeter takes IClock" }),
+      act("done", { summary: "nothing to do" }), // todo 2 claims done without the change: the pending checks catch it
+      act("edit", { path: "app.txt", search: "Greeter(IClock)", replace: "Greeter(IClock)\nSystemClock implements IClock" }),
+      act("done", { summary: "SystemClock implements IClock" }),
+    ]);
+    const r = await run(root, provider, "Extract IClock");
+    expect(JSON.stringify(provider.seen[4])).toMatch(/run again after it/);
+    expect(JSON.stringify(provider.seen[5])).toMatch(/verification failed/);
+    expect(read("app.txt")).toContain("implements");
+    expect(r.status).toBe("done");
+  });
+
   it("refuses to edit a file the model hasn't read in this task", async () => {
     const { root, read } = workspace({ "src/a.js": "exports.a = 1;\n" });
     const edit = act("edit", { path: "src/a.js", search: "exports.a = 1;", replace: "exports.a = 2;" });

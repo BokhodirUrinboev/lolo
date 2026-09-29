@@ -2,7 +2,7 @@ import { listFiles } from "../context/repoMap";
 import { fileSymbols, languageFor } from "../context/treeSitter";
 import { applyLineRange, editToolFor, EditTool, isLazyPlaceholder, mergeLazyRewrite } from "../edit/formats";
 import { fuzzyApply, overlapCandidates, reindent } from "../edit/fuzzyApply";
-import { checkEditSyntax, findImbalance } from "../edit/syntaxGuard";
+import { checkEditSyntax, findImbalance, syntaxRepairs } from "../edit/syntaxGuard";
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
 import { IGNORED_DIRS } from "./paths";
 import { symbolSummary } from "./output";
@@ -268,7 +268,7 @@ async function redefinition(path: string, original: string, search: string, repl
   const r = toLf(replace).replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "");
   if (!def || s.split("\n").length >= def.endLine - def.line + 1) return undefined; // search already spans it
   const rLines = r.split("\n");
-  if (!rLines[0].includes(def.name) || !r.includes("{") || findImbalance(r) || rLines.length < 2) return undefined;
+  if (!rLines[0].includes(def.name) || !r.includes("{") || findImbalance(r)) return undefined;
   const body = reindent(r, [rLines[0]], [lines[def.line - 1]]);
   const content = fromLf([...lines.slice(0, def.line - 1), ...body, ...lines.slice(def.endLine)].join("\n"), detectEol(original));
   if (await checkEditSyntax(path, original, content)) return undefined;
@@ -291,8 +291,14 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
   if (pkg) return fail(pkg, `${reason}: rejected (package added by hand)`);
   const broken = await checkEditSyntax(path, before, content, fragment);
   if (broken) {
-    ctx.edits.recordFailure(path);
-    return fail(broken, `${reason}: rejected (syntax error)`);
+    let repaired: { text: string; note: string } | undefined;
+    for (const r of syntaxRepairs(path, content)) if (!(await checkEditSyntax(path, before, r.text))) (repaired ??= r);
+    if (!repaired) {
+      ctx.edits.recordFailure(path);
+      return fail(broken, `${reason}: rejected (syntax error)`);
+    }
+    content = repaired.text;
+    note += ` (${repaired.note})`;
   }
   const outcome = await ctx.host.proposeWrite(path, content, { isNew, reason });
   if (!outcome.applied) {

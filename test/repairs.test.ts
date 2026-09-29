@@ -3,13 +3,13 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { laterTodoFor } from "../src/agent/loop";
-import { mergeTodos, namedFiles } from "../src/agent/planner";
+import { dropLookOnlyTodos, mergeTodos, namedFiles } from "../src/agent/planner";
 import { isTestFile, protectTests } from "../src/agent/testGuard";
 import { EditState } from "../src/edit/formats";
 import { fuzzyApply } from "../src/edit/fuzzyApply";
 import { NodeHost } from "../src/host/nodeHost";
 import { resolveProfile } from "../src/providers/modelProfiles";
-import { createFile, doubleEscaped, editFile } from "../src/tools/fileTools";
+import { createFile, doubleEscaped, editFile, rewriteFile } from "../src/tools/fileTools";
 import { addUsing, missingUsings, workspacePath } from "../src/tools/missingImports";
 import { relativizePaths } from "../src/tools/output";
 import { ToolRegistry } from "../src/tools/registry";
@@ -124,6 +124,13 @@ describe("replace that repeats the lines around search", () => {
     expect(r2("a.js")).toBe("function f(x) {\n  if (!x) return 0;\n  return x;\n}\n");
   });
 
+  it("accepts a one-line complete redefinition too", async () => {
+    const { ctx, read } = workspace({ "SystemClock.cs": "namespace Greetings;\n\npublic class SystemClock\n{\n    public DateTime Now => DateTime.Now;\n}\n" });
+    const r = await editFile.run({ path: "SystemClock.cs", search: "public class SystemClock", replace: "public class SystemClock : IClock { public DateTime Now => DateTime.Now; }" }, ctx);
+    expect(r.ok).toBe(true);
+    expect(read("SystemClock.cs")).toBe("namespace Greetings;\n\npublic class SystemClock : IClock { public DateTime Now => DateTime.Now; }\n");
+  });
+
   it("leaves valid edits alone, even when they add a similar line", async () => {
     const { ctx, read } = workspace({ "b.js": "function f() {\n  a();\n}\n" });
     await editFile.run({ path: "b.js", search: "  a();", replace: "  a();\n  a();" }, ctx);
@@ -162,6 +169,19 @@ describe("checks deferred to a later todo", () => {
     expect(laterTodoFor(build, ["Add a README section"])).toBeUndefined();
     expect(laterTodoFor(build, [])).toBeUndefined();
     expect(laterTodoFor("AssertionError: Expected values to be strictly equal", ["Handle the AssertionError case"])).toBeUndefined();
+  });
+});
+
+describe("syntax repairs", () => {
+  it("turns `namespace X;` followed by braces into a block-scoped namespace (C#)", async () => {
+    const before = "using Shop.Models;\n\nnamespace Shop.Services;\n\npublic class OrderService\n{\n    public decimal Total(Order o) => o.Lines.Sum(l => l.Price);\n}\n";
+    const { ctx, read } = workspace({ "Services/OrderService.cs": before });
+    const content =
+      "using Shop.Models;\n\nnamespace Shop.Services;\n{\n    public class OrderService\n    {\n        public decimal Total(Order o) => o.Lines == null ? 0 : o.Lines.Sum(l => l.Price);\n    }\n}";
+    const r = await rewriteFile.run({ path: "Services/OrderService.cs", content }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("namespace X { ... }");
+    expect(read("Services/OrderService.cs")).toContain("namespace Shop.Services\n{");
   });
 });
 
@@ -230,6 +250,20 @@ describe("mergeTodos", () => {
       "Create a new file IClock.cs with the following content:\n```csharp\npublic interface IClock\n{\nDateTime Now { get; }\n}\n```",
       "Make SystemClock implement IClock",
     ]);
+  });
+
+  it("drops todos that only look, keeping checks the user may have asked for", () => {
+    const todos = [
+      "Read the changes in src/rate.js using git diff.",
+      "Identify the specific change that broke the tests.",
+      "Locate the corresponding test in test/rate.test.js.",
+      "Fix the change in src/rate.js to keep the rounding to cents.",
+      "Run the tests to verify the fix.",
+    ];
+    expect(dropLookOnlyTodos(todos, "g")).toEqual([todos[3], todos[4]]);
+    expect(dropLookOnlyTodos(["Find and fix the null check in src/a.js"], "g")).toEqual(["Find and fix the null check in src/a.js"]);
+    expect(dropLookOnlyTodos(["Read src/a.js", "Review src/b.js"], "Explain the code")).toEqual(["Explain the code"]);
+    expect(dropLookOnlyTodos(["Check the /health endpoint with curl"], "g")).toEqual(["Check the /health endpoint with curl"]);
   });
 
   it("keeps todos about different or several files apart", () => {

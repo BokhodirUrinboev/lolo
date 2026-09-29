@@ -291,9 +291,10 @@ export class Agent {
         extract: (text, question, sig) => this.extract(text, question, stats, sig),
       };
       const summaries: string[] = [];
+      const checksPending = { value: false };
       for (let i = 0; i < todos.length; i++) {
         emit({ type: "todo", index: i, status: "active" });
-        const outcome = await this.runTodo(i, todos, execMode, { prefix, history, ctx, rules, budget, stats, changed, emit, log, signal, task });
+        const outcome = await this.runTodo(i, todos, execMode, { prefix, history, ctx, rules, budget, stats, changed, emit, log, signal, task, checksPending });
         if (!outcome.ok) {
           emit({ type: "todo", index: i, status: "failed" });
           return finish("failed", [...summaries, `Stopped at todo ${i + 1} (${todos[i]}): ${outcome.summary}`].join("\n"));
@@ -328,6 +329,8 @@ export class Agent {
       signal?: AbortSignal;
       /** The user's message (web access is decided from it, too). */
       task: string;
+      /** Checks failed at an earlier todo and were deferred: they run at every done until they pass. */
+      checksPending: { value: boolean };
     },
   ): Promise<{ ok: boolean; summary: string }> {
     const { history, ctx, stats, emit, log } = s;
@@ -510,13 +513,14 @@ export class Agent {
       if (tool.name === "done" || tool.name === "answer") {
         const summary = String(args.summary ?? args.text);
         // Checks from rules, else inferred from project files (detected now, so projects created in this run count).
-        const checks = changedInTodo ? (s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host)) : [];
+        const checks = changedInTodo || s.checksPending.value ? (s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host)) : [];
         if (checks.length) {
           const failed = await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f)));
           // Mid-plan, the build may not pass yet: Greeter takes an IClock (todo 1) before SystemClock
           // implements it (todo 2). When the errors are about what a later todo does, check after that one.
           const later = failed ? laterTodoFor(failed, todos.slice(index + 1)) : undefined;
           if (failed && later !== undefined) {
+            s.checksPending.value = true;
             log?.write("verify", { ok: false, deferred: later });
             history.add(assistant, `Todo complete. The checks don't pass yet, but the errors are about what a later todo does ("${later}"); they run again after it.`, `done: ${summary.slice(0, 120)} (checks deferred)`);
             log?.write("todo_done", { index, summary, deferred: true });
@@ -531,6 +535,7 @@ export class Agent {
             continue;
           }
           log?.write("verify", { ok: true });
+          s.checksPending.value = false;
         }
         history.add(assistant, "Todo complete.", `done: ${summary.slice(0, 120)}`);
         log?.write("todo_done", { index, summary });
