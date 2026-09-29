@@ -18,6 +18,8 @@ export interface Schema {
   minItems?: number;
   maxItems?: number;
   minLength?: number;
+  /** Also passed to constrained decoding: caps runaway strings (a `thought` that never ends). */
+  maxLength?: number;
   anyOf?: Schema[];
 }
 

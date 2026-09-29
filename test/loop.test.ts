@@ -16,7 +16,13 @@ class Scripted implements LLMProvider {
   async chat(req: ChatRequest) {
     this.seen.push(req.messages);
     const next = this.replies.shift() ?? { thought: "out of script", action: { tool: "done", args: { summary: "end" } } };
-    return { content: typeof next === "string" ? next : JSON.stringify(next) };
+    const content = typeof next === "string" ? next : JSON.stringify(next);
+    // Streamed in chunks like a real endpoint, so guards on partial output can stop it.
+    for (let i = 0; i < content.length; i += 50) {
+      if (req.signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      req.onToken?.(content.slice(i, i + 50));
+    }
+    return { content };
   }
   async complete() {
     return "";
@@ -104,6 +110,15 @@ describe("agent loop", () => {
     expect(JSON.stringify(provider.seen[4])).toMatch(/run again after it/);
     expect(JSON.stringify(provider.seen[5])).toMatch(/verification failed/);
     expect(read("app.txt")).toContain("implements");
+    expect(r.status).toBe("done");
+  });
+
+  it("cuts off a thought that runs on without an action", async () => {
+    const { root } = workspace({ "a.txt": "x\n" });
+    const rambling = `{"thought":"${"I should think about this more carefully. ".repeat(60)}`;
+    const provider = new Scripted([plan(["Look at a.txt"]), rambling, act("done", { summary: "ok" })]);
+    const r = await run(root, provider, "Look at a.txt and change nothing");
+    expect(JSON.stringify(provider.seen.at(-1))).toMatch(/thought was far too long/);
     expect(r.status).toBe("done");
   });
 

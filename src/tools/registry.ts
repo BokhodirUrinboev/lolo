@@ -32,6 +32,9 @@ export const ALL_TOOLS: ToolDef[] = [
   done, answer,
 ];
 
+/** Longest `thought` the schema allows: qwen3.5 sometimes reasons in it until the token limit (55 s a step). */
+export const THOUGHT_MAX = 800;
+
 /** Tools that change an existing file's lines: the model must have seen the file first. */
 const EDITS_EXISTING = new Set(["edit", "rewrite_file", "edit_lines"]);
 
@@ -75,7 +78,7 @@ export class ToolRegistry {
     return {
       type: "object",
       properties: {
-        thought: { type: "string", description: "One or two sentences: what you do next and why." },
+        thought: { type: "string", maxLength: THOUGHT_MAX, description: "One or two sentences: what you do next and why." },
         action: {
           anyOf: tools.map((t) => ({
             type: "object",

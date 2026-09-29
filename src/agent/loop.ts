@@ -157,6 +157,8 @@ function mcpSummary(tools: McpToolDef[]): string {
 
 /** Stop and ask the user after this many consecutive failed or invalid steps. */
 const MAX_CONSECUTIVE_FAILURES = 4;
+/** A thought longer than this (characters) before any action is cut off; the schema allows THOUGHT_MAX. */
+const THOUGHT_ABORT = 1500;
 /** Consecutive reads (agent mode) after which the model is reminded to act. */
 const READS_BEFORE_NUDGE = 5;
 /** Extra attempts after a model generation failure. */
@@ -434,7 +436,9 @@ export class Agent {
       if (res.degenerate) {
         stats.invalidCalls++;
         failures++;
-        const advice = "Your reply degenerated into repeating itself and was cut off. Take a smaller step: change a few lines with edit instead of rewriting a whole file.";
+        const advice = res.longThought
+          ? "Your thought was far too long and was cut off. Keep it to one or two sentences, then give the tool call."
+          : "Your reply degenerated into repeating itself and was cut off. Take a smaller step: change a few lines with edit instead of rewriting a whole file.";
         emit({ type: "invalid", error: "model output degenerated; asked for a smaller step" });
         history.add("(no reply)", advice, "reply degenerated");
         if (failures >= MAX_CONSECUTIVE_FAILURES) {
@@ -627,7 +631,7 @@ export class Agent {
     stats: RunStats,
     emit: (e: AgentEvent) => void,
     signal?: AbortSignal,
-  ): Promise<ChatResponse & { degenerate?: boolean }> {
+  ): Promise<ChatResponse & { degenerate?: boolean; longThought?: boolean }> {
     const { provider } = this.deps;
     const mode = provider.profile.toolMode;
     const schema = mode === "schema" ? this.registry.actionSchema(enabled) : undefined;
@@ -635,8 +639,18 @@ export class Agent {
     for (let attempt = 0; ; attempt++) {
       let partial = "";
       let lastEmit = 0;
+      // A thought that keeps growing before any action (qwen3.5 reasoning until the token limit) is stopped early.
+      const guard = new AbortController();
+      let longThought = false;
       const onToken = (delta: string) => {
         partial += delta;
+        if (!longThought && partial.length > THOUGHT_ABORT && !/"action"s*:|<tool/.test(partial)) {
+          const t = partialJsonString(partial, "thought") ?? (mode === "native" ? partial : "");
+          if (t.length > THOUGHT_ABORT) {
+            longThought = true;
+            guard.abort();
+          }
+        }
         const now = Date.now();
         if (now - lastEmit < 100) return;
         lastEmit = now;
@@ -649,7 +663,7 @@ export class Agent {
           messages,
           schema,
           tools,
-          signal,
+          signal: signal ? AbortSignal.any([signal, guard.signal]) : guard.signal,
           onToken,
           temperature: provider.profile.temperature + attempt * 0.3,
           repeatPenalty: attempt ? 1.1 + attempt * 0.1 : undefined,
@@ -658,6 +672,7 @@ export class Agent {
         const call = res.toolCalls?.[0];
         return call ? { ...res, content: JSON.stringify({ thought: res.content.trim(), action: { tool: call.name, args: call.arguments } }) } : res;
       } catch (e) {
+        if (longThought && !signal?.aborted) return { content: "", degenerate: true, longThought: true };
         const retryable = e instanceof ProviderError && e.status === undefined && !signal?.aborted;
         if (!retryable) throw e;
         // Still degenerate after retries: not fatal. An empty reply becomes an invalid step with advice.

@@ -42,9 +42,14 @@ const QUESTION_WORDS = /^\s*(how|what|why|where|which|when|explain)\b|\b(qanday|
  * Message kinds the planner may choose, decided without the model: small models
  * misread short or non-English messages (and "???" once re-ran a project generator).
  */
+/** Asking to remember something ("Remember that ...", "from now on ..."): a task for the remember tool, not small talk. */
+const REMEMBER =
+  /^\s*(please\s+|pls\s+)?(remember|keep in mind|memori[sz]e|note that)\b|\b(can|could|would|will) you (please )?(remember|keep in mind)\b|\bfrom now on\b|eslab qol|esda tut|запомни|впредь/i;
+
 export function allowedKinds(text: string): MessageKind[] {
   const t = text.trim();
   if (!/[\p{L}\p{N}]/u.test(t)) return ["chat"]; // only punctuation/emoji: "???", "!!", "👍"
+  if (REMEMBER.test(t)) return ["task"]; // qwen3.5 answered "Understood, I will remember" and saved nothing
   if (REQUEST_WORDS.test(t)) return ["task", "question", "chat"];
   if (QUESTION_WORDS.test(t)) return ["question"]; // a real question gets a real (read-the-code) answer
   if (/\?\s*$/.test(t)) return ["question", "chat"]; // "qalaysan?" may just be small talk
