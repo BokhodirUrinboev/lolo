@@ -470,7 +470,8 @@ export const editLines: ToolDef<{ path: string; start_line: number; end_line: nu
   async check(a, ctx) {
     fixEscapes(a);
     if (a.start_line === 1 && a.end_line === 0 && (await createsFile(a.path, ctx))) return createFile.check!(a, ctx);
-    return (await mustBeFile(a.path, ctx)) ?? mustUse("edit_lines", a.path, ctx);
+    const refused = (await mustBeFile(a.path, ctx)) ?? (await mustUse("edit_lines", a.path, ctx));
+    return refused ?? moduleSystemProblem(a.path, a.content, await ctx.host.readFile(a.path), ctx);
   },
   async run(a, ctx) {
     if ((await ctx.host.stat(a.path)) === null) return createFile.run(a, ctx);

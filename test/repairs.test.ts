@@ -246,6 +246,8 @@ describe("module system", () => {
     expect(await createFile.check!({ path: "src/tax.js", content: "function computeTax(amount) {\n  return amount * 0.12;\n}\n\nmodule.exports = { computeTax };\n" }, ctx)).toBeUndefined();
     expect(await editFile.check!({ path: "src/order.js", search: "module.exports = { orderTotal };", replace: "export { orderTotal };" }, ctx)).toMatch(/CommonJS/);
     expect(await rewriteFile.check!({ path: "src/util.js", content: "export const round = (x) => Math.round(x * 100) / 100;\n" }, ctx)).toMatch(/CommonJS/);
+    const lineCtx: ToolContext = { ...ctx, profile: { ...ctx.profile, editFormat: "line-range" } };
+    expect(await editLines.check!({ path: "src/order.js", start_line: 1, end_line: 1, content: "import { round } from './util';" }, lineCtx)).toMatch(/CommonJS/);
     // Converting is fine when the todo asks for it.
     expect(await createFile.check!({ path: "src/tax.js", content: "export const t = 1;\n" }, { ...ctx, todo: "Convert the project to ES modules" })).toBeUndefined();
     expect(await createFile.check!({ path: "src/tax.cjs", content: "export const t = 1;\n" }, ctx)).toMatch(/\.cjs/);
