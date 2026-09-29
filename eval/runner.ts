@@ -213,34 +213,41 @@ async function fimBench(argv: string[]) {
     const t0 = Date.now();
     const raw = await provider.complete({
       prompt: buildFimPrompt(fim, { path: s.path, prefix: s.prefix, suffix: s.suffix }),
-      maxTokens: s.midLine ? 48 : 128,
+      maxTokens: 128,
       temperature: 0.1,
-      stop: [...(fim.stop ?? []), ...(s.midLine ? ["\n"] : [])],
+      stop: fim.stop,
     });
     return { ms: Date.now() - t0, text: postprocessCompletion(raw, s.prefix, s.suffix) };
   };
   for (const s of samples.slice(0, 2)) await run(s); // load the model
   const times: number[] = [];
   let empty = 0;
+  let asWritten = 0;
+  const norm = (l: string) => l.replace(/\s+/g, " ").trim();
   for (const s of samples) {
     const r = await run(s);
     times.push(r.ms);
     if (!r.text.trim()) empty++;
+    if (norm(r.text.split("\n")[0]) === norm(s.expected)) asWritten++;
   }
   const sorted = [...times].sort((a, b) => a - b);
   const pct = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
   console.log(`${values.model}${values.cpu ? " (CPU only)" : ""}: ${samples.length} completions`);
-  console.log(`p50 ${pct(50)}ms · p90 ${pct(90)}ms · max ${sorted[sorted.length - 1]}ms · ${empty} empty`);
+  console.log(`p50 ${pct(50)}ms · p90 ${pct(90)}ms · max ${sorted[sorted.length - 1]}ms · ${empty} empty · first line as the file has it: ${asWritten}/${samples.length}`);
 }
 
 interface FimSample {
   path: string;
   prefix: string;
   suffix: string;
-  midLine: boolean;
+  /** The rest of the line as the file has it; removed from the suffix, as if not typed yet. */
+  expected: string;
 }
 
-/** Deterministic cursor positions in the eval repos' code files. */
+/**
+ * Deterministic cursor positions in the eval repos' code files: at the indentation of a body
+ * line, and in its middle. The rest of that line is removed, as if it weren't typed yet.
+ */
 function fimSamples(tasksDir: string, n: number): FimSample[] {
   const files: string[] = [];
   const walk = (d: string) => {
@@ -262,7 +269,13 @@ function fimSamples(tasksDir: string, n: number): FimSample[] {
       const start = lines.slice(0, i).join("\n").length + (i ? 1 : 0);
       const indent = /^\s*/.exec(lines[i])![0].length;
       const cut = k === 0 ? start + indent : start + Math.floor(lines[i].length / 2);
-      out.push({ path: path.relative(tasksDir, f).replace(/\\/g, "/"), prefix: text.slice(Math.max(0, cut - 4000), cut), suffix: text.slice(cut, cut + 1500), midLine: k === 1 });
+      const lineEnd = start + lines[i].length;
+      out.push({
+        path: path.relative(tasksDir, f).replace(/\\/g, "/"),
+        prefix: text.slice(Math.max(0, cut - 4000), cut),
+        suffix: text.slice(lineEnd, lineEnd + 1500),
+        expected: text.slice(cut, lineEnd),
+      });
     }
   }
   return out.slice(0, n);
