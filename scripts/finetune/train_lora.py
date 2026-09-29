@@ -17,7 +17,7 @@ Only the assistant replies (tool calls, plans) are trained; prompts are masked.
 Samples come from successful runs only, and invalid/stuck steps are dropped by the export.
 Hold some eval tasks out of the dataset (--exclude), or the eval measures memorization.
 Stop Ollama's loaded models first (`ollama stop <model>`): training needs the GPU memory.
-Measured on a 12 GB RTX GPU: ~5.4 GB after loading, 1 epoch over 2k samples ≈ 3-4 h.
+Measured on an RTX 4070 Ti (12 GB, Windows): 1 epoch over 2k samples takes ~1 h, ~9 GB of VRAM.
 """
 import os
 import sys
@@ -38,8 +38,24 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     data_file, out_dir = args[0], args[1]
     epochs = float(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--epochs=")), "2"))
-    # Samples from the eval are ~2k tokens (the longest ~4k); longer ones keep their end.
-    MAX_LEN = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--max-len=")), "4096"))
+    # Samples from the eval are ~2k tokens (6% over 3k); longer ones keep their end, which holds
+    # the trained reply. 4096 needs over 9 GB of VRAM, 3072 fits a 12 GB card next to the desktop.
+    MAX_LEN = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--max-len=")), "3072"))
+
+    if sys.platform == "win32":
+        # PyTorch for Windows has no FlashAttention, so SDPA with grouped-query attention
+        # (enable_gqa) runs the math kernel: a full fp32 score matrix per head, slow and O(n²) in
+        # memory. With K/V expanded first, SDPA uses its memory-efficient kernel.
+        import unsloth.utils.attention_dispatch as attention_dispatch
+
+        attention_dispatch.SDPA_HAS_GQA = False
+
+        # When VRAM runs out, the Windows driver moves memory to system RAM instead of failing,
+        # and training gets much slower. Kept below the free VRAM, PyTorch reuses its cache.
+        import torch
+
+        free, total = torch.cuda.mem_get_info()
+        torch.cuda.set_per_process_memory_fraction(max(0.5, (free - 1.5 * 1024**3) / total))
 
     model, tokenizer = FastLanguageModel.from_pretrained("unsloth/Qwen2.5-Coder-7B-Instruct", max_seq_length=MAX_LEN, load_in_4bit=True)
     model = FastLanguageModel.get_peft_model(
