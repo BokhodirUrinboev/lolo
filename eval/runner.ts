@@ -393,7 +393,8 @@ function exportDataset(argv: string[]) {
       .filter((f) => f.endsWith(".jsonl") && !excluded.some((x) => f.startsWith(`${x}-`) || f.includes(x)))
       .map((f) => path.join(dir, f));
   });
-  const out: string[] = [];
+  // A set: repeated runs of a task often make identical calls, and duplicates only overweight them.
+  const out = new Set<string>();
   for (const file of files) {
     if (!values["include-failed"] && file.endsWith("-fail.jsonl")) continue;
     const events = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -404,11 +405,11 @@ function exportDataset(argv: string[]) {
       messages = [...messages.slice(0, e.from), ...e.messages];
       const next = events.slice(i + 1).find((x) => x.type !== "compaction");
       if (next && (next.type === "invalid" || next.type === "stuck")) return;
-      out.push(JSON.stringify({ messages: [...messages, { role: "assistant", content: e.response }] }));
+      out.add(JSON.stringify({ messages: [...messages, { role: "assistant", content: e.response }] }));
     });
   }
-  writeFileSync(values.out!, out.join("\n") + (out.length ? "\n" : ""));
-  console.log(`${out.length} samples from ${files.length} trajectories → ${values.out}`);
+  writeFileSync(values.out!, [...out].join("\n") + (out.size ? "\n" : ""));
+  console.log(`${out.size} samples from ${files.length} trajectories → ${values.out}`);
 }
 
 const [cmd, ...rest] = process.argv.slice(2);
