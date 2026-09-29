@@ -9,7 +9,7 @@ import { EditState } from "../src/edit/formats";
 import { fuzzyApply } from "../src/edit/fuzzyApply";
 import { NodeHost } from "../src/host/nodeHost";
 import { resolveProfile } from "../src/providers/modelProfiles";
-import { createFile, doubleEscaped, editFile, rewriteFile } from "../src/tools/fileTools";
+import { createFile, doubleEscaped, editFile, editLines, rewriteFile } from "../src/tools/fileTools";
 import { addUsing, missingUsings, workspacePath } from "../src/tools/missingImports";
 import { relativizePaths } from "../src/tools/output";
 import { errorContext } from "../src/tools/testReport";
@@ -201,6 +201,64 @@ describe("placeholders in new code", () => {
     expect(await editFile.check!({ path: "src/users.js", search: "  return 1;", replace: "  // ... rest of the code ...\n  return 2;" }, ctx)).toMatch(/placeholder/);
     // A comment that is already in the file is not a new hole.
     expect(await editFile.check!({ path: "src/users.js", search: "  return 1;", replace: "  return 1; // existing implementation note" }, ctx)).toBeUndefined();
+  });
+
+  it("refuses left-out bodies, unless the todo asks for stubs", async () => {
+    const { ctx } = workspace({ "src/users.js": "function a() {\n  return 1;\n}\n" });
+    const elided = "export function validateEmail(email) { ... }\nexport function validatePhone(phone) { ... }\n";
+    const comment = "module.exports = {\n  validateEmail: function(email) {\n    // Email validation logic here\n  },\n};\n";
+    expect(await createFile.check!({ path: "src/validators.js", content: elided }, ctx)).toMatch(/placeholder.*read the file the code comes from/);
+    expect(await createFile.check!({ path: "src/validators.js", content: comment }, ctx)).toMatch(/Email validation logic here/);
+    expect(await createFile.check!({ path: "src/tax.py", content: "def tax(x):\n    # TODO: implement\n    pass\n" }, ctx)).toMatch(/placeholder/);
+    // A section comment above real code is not a body left out.
+    const real = "// Validation logic here\nfunction validateEmail(email) {\n  return email.includes(\"@\");\n}\n";
+    expect(await createFile.check!({ path: "src/validators.js", content: real }, ctx)).toBeUndefined();
+    expect(await createFile.check!({ path: "src/validators.js", content: elided }, { ...ctx, todo: "Create src/validators.js with stub functions" })).toBeUndefined();
+    // In a rewrite of an existing file too; "existing code" placeholders are still merged, not refused.
+    expect(await rewriteFile.check!({ path: "src/users.js", content: "function a() {\n  // implementation goes here\n}\n" }, ctx)).toMatch(/placeholder/);
+    expect(await rewriteFile.check!({ path: "src/users.js", content: "function a() {\n  // ... existing code here\n}\nfunction b() {}\n" }, ctx)).toBeUndefined();
+  });
+
+  it("creates a missing file written with rewrite_file or edit_lines at line 1", async () => {
+    const { ctx, read } = workspace({ "src/users.js": "function a() {\n  return 1;\n}\n", "lib/util.js": "module.exports = {};\n" });
+    const content = "function validateEmail(email) {\n  return email.includes(\"@\");\n}\n";
+    expect(await rewriteFile.check!({ path: "src/validators.js", content }, ctx)).toBeUndefined();
+    expect((await rewriteFile.run({ path: "src/validators.js", content }, ctx)).ok).toBe(true);
+    expect(read("src/validators.js")).toBe(content);
+    const lines = { path: "src/phone.js", start_line: 1, end_line: 0, content: "module.exports = { ok: true };\n" };
+    expect(await editLines.check!(lines, ctx)).toBeUndefined();
+    expect((await editLines.run(lines, ctx)).ok).toBe(true);
+    expect(read("src/phone.js")).toContain("ok: true");
+    // A file with that name elsewhere: the plan guessed the folder, so no second copy.
+    expect(await rewriteFile.check!({ path: "src/util.js", content: "module.exports = {};\n" }, ctx)).toMatch(/lib\/util\.js does/);
+  });
+});
+
+describe("module system", () => {
+  const cjs = {
+    "src/order.js": "const { round } = require(\"./util\");\n\nfunction orderTotal(n) {\n  return round(n * 1.12);\n}\n\nmodule.exports = { orderTotal };\n",
+    "src/util.js": "module.exports = { round: (x) => Math.round(x * 100) / 100 };\n",
+  };
+
+  it("refuses export/import in a CommonJS project", async () => {
+    const { ctx } = workspace(cjs);
+    expect(await createFile.check!({ path: "src/tax.js", content: "export function computeTax(amount) {\n  return amount * 0.12;\n}\n" }, ctx)).toMatch(/CommonJS.*module\.exports = \{ name \}/);
+    expect(await createFile.check!({ path: "src/tax.js", content: "function computeTax(amount) {\n  return amount * 0.12;\n}\n\nmodule.exports = { computeTax };\n" }, ctx)).toBeUndefined();
+    expect(await editFile.check!({ path: "src/order.js", search: "module.exports = { orderTotal };", replace: "export { orderTotal };" }, ctx)).toMatch(/CommonJS/);
+    expect(await rewriteFile.check!({ path: "src/util.js", content: "export const round = (x) => Math.round(x * 100) / 100;\n" }, ctx)).toMatch(/CommonJS/);
+    // Converting is fine when the todo asks for it.
+    expect(await createFile.check!({ path: "src/tax.js", content: "export const t = 1;\n" }, { ...ctx, todo: "Convert the project to ES modules" })).toBeUndefined();
+    expect(await createFile.check!({ path: "src/tax.cjs", content: "export const t = 1;\n" }, ctx)).toMatch(/\.cjs/);
+  });
+
+  it("refuses require in an ES module project, and leaves bundled code alone", async () => {
+    const esm = workspace({ "package.json": "{\"type\": \"module\"}", "src/a.js": "export const a = 1;\n" });
+    expect(await createFile.check!({ path: "src/b.js", content: "const { a } = require(\"./a\");\nmodule.exports = { b: a };\n" }, esm.ctx)).toMatch(/"type": "module"/);
+    expect(await createFile.check!({ path: "src/b.js", content: "import { a } from \"./a.js\";\nexport const b = a;\n" }, esm.ctx)).toBeUndefined();
+    expect(await createFile.check!({ path: "lib/x.mjs", content: "module.exports = {};\n" }, esm.ctx)).toMatch(/\.mjs/);
+    // No "type", but the project's code is import/export (a bundler runs it): export is right.
+    const web = workspace({ "package.json": "{\"name\": \"web\"}", "src/app.js": "import { h } from \"./h\";\nexport default h;\n" });
+    expect(await createFile.check!({ path: "src/h.js", content: "export function h() {}\n" }, web.ctx)).toBeUndefined();
   });
 });
 

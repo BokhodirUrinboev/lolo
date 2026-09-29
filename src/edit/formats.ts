@@ -86,6 +86,22 @@ export function isLazyPlaceholder(line: string, originalTrimmed: Set<string>): b
     /^(the )?(rest of|remaining|existing|other)\b.*\b(code|file|methods?|functions?|implementation|unchanged|same)\b/i.test(body);
 }
 
+const ELIDED_BODY = /\{\s*(?:\.\.\.|…)\s*\}/;
+const STUB_COMMENT = /^(?:.*\b(?:logic|code|implementation|body)\s+(?:goes\s+)?here|todo:?\s*implement\b.*|implement\b.*\bhere)[.!:]?$/i;
+
+/**
+ * True for a body the model left out of new code: `function f(x) { ... }`, or a comment like
+ * `// validation logic here` / `# TODO: implement` right after the line that opens the body
+ * (`previous`), which tells it apart from a section comment above real code.
+ */
+export function isStub(line: string, previous: string | undefined, originalTrimmed: Set<string>): boolean {
+  const t = line.trim();
+  if (!t || originalTrimmed.has(t)) return false;
+  if (ELIDED_BODY.test(t)) return true;
+  const body = t.replace(COMMENT_EDGES, "").trim();
+  return body !== t && STUB_COMMENT.test(body) && /(?:\{|:|=>)$/.test(previous?.trim() ?? "");
+}
+
 export type MergeResult = { ok: true; content: string; filled: number } | { ok: false; reason: string };
 
 /**

@@ -1,9 +1,10 @@
 import { listFiles } from "../context/repoMap";
 import { fileSymbols, languageFor } from "../context/treeSitter";
-import { applyLineRange, editToolFor, EditTool, isLazyPlaceholder, mergeLazyRewrite } from "../edit/formats";
+import { applyLineRange, editToolFor, EditTool, isLazyPlaceholder, isStub, mergeLazyRewrite } from "../edit/formats";
 import { fuzzyApply, overlapCandidates, reindent } from "../edit/fuzzyApply";
 import { checkEditSyntax, findImbalance, syntaxRepairs } from "../edit/syntaxGuard";
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
+import { moduleSystemProblem } from "./moduleSystem";
 import { IGNORED_DIRS } from "./paths";
 import { symbolSummary } from "./output";
 import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
@@ -233,13 +234,35 @@ const ESCAPE_NOTE = " (your line breaks were escaped twice as \\\\n; they were t
  * A `// existing implementation` / `// ... rest of the code` line that `before` doesn't have:
  * in new code it is a hole, not code (a moved function written as a stub). Error text, or undefined.
  */
-function placeholderIn(text: string, before: string, path: string): string | undefined {
+function placeholderIn(text: string, before: string, path: string, todo?: string): string | undefined {
   if (!languageFor(path) && !BRACE_FILE.test(path)) return undefined;
   const known = new Set(toLf(before).split("\n").map((l) => l.trim()));
   const hole = toLf(text).split("\n").find((l) => isLazyPlaceholder(l, known));
-  return hole
-    ? `\`${hole.trim()}\` is a placeholder, not code. Write the real code${before ? "" : " (read the file the code comes from, and copy it)"}; nothing may be left out.`
-    : undefined;
+  return hole ? holeError(hole, before) : stubIn(text, before, path, todo);
+}
+
+const WANTS_STUBS = /\b(?:[Ss]tubs?|[Ss]keletons?|[Ss]caffold\w*|[Pp]laceholders?)\b|\bTODOs?\b/;
+
+/**
+ * A body left out of new code (`{ ... }`, `// validation logic here` right after `{`): models write
+ * the new file of a move or split before reading the code they move. Error text, or undefined.
+ * "Existing code" placeholders are left to mergeLazyRewrite; a todo asking for stubs gets them.
+ */
+function stubIn(text: string, before: string, path: string, todo?: string): string | undefined {
+  if ((!languageFor(path) && !BRACE_FILE.test(path)) || WANTS_STUBS.test(todo ?? "")) return undefined;
+  const known = new Set(toLf(before).split("\n").map((l) => l.trim()));
+  const lines = toLf(text).split("\n");
+  const previous = (i: number) => lines.slice(0, i).reverse().find((p) => p.trim());
+  const stub = lines.find((l, i) => !isLazyPlaceholder(l, known) && isStub(l, previous(i), known));
+  return stub ? holeError(stub, before) : undefined;
+}
+
+const holeError = (line: string, before: string) =>
+  `\`${line.trim()}\` is a placeholder, not code. Write the real code${before ? "" : " (read the file the code comes from, and copy it)"}; nothing may be left out.`;
+
+/** A whole-file write to a path that doesn't exist (and isn't a misplaced existing file) creates it. */
+async function createsFile(path: string, ctx: ToolContext): Promise<boolean> {
+  return (await ctx.host.stat(path)) === null && !(await sameName(path, ctx)).length;
 }
 
 interface Def {
@@ -325,7 +348,10 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
     required: ["path", "search", "replace"],
   },
   async check(a, ctx) {
-    return (await mustBeFile(a.path, ctx)) ?? placeholderIn(a.replace, await ctx.host.readFile(a.path), a.path);
+    const missing = await mustBeFile(a.path, ctx);
+    if (missing) return missing;
+    const before = await ctx.host.readFile(a.path);
+    return placeholderIn(a.replace, before, a.path, ctx.todo) ?? moduleSystemProblem(a.path, a.replace, before, ctx);
   },
   async run(a, ctx) {
     const original = await ctx.host.readFile(a.path);
@@ -410,9 +436,15 @@ export const rewriteFile: ToolDef<{ path: string; content: string }> = {
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
     fixEscapes(a);
-    return (await mustBeFile(a.path, ctx)) ?? mustUse("rewrite_file", a.path, ctx);
+    // Models "rewrite" the new file of a move or split: the complete content of a missing file creates it.
+    if (await createsFile(a.path, ctx)) return createFile.check!(a, ctx);
+    const refused = (await mustBeFile(a.path, ctx)) ?? (await mustUse("rewrite_file", a.path, ctx));
+    if (refused) return refused;
+    const before = await ctx.host.readFile(a.path);
+    return stubIn(a.content, before, a.path, ctx.todo) ?? moduleSystemProblem(a.path, a.content, before, ctx);
   },
   async run(a, ctx) {
+    if ((await ctx.host.stat(a.path)) === null) return createFile.run(a, ctx);
     const original = await ctx.host.readFile(a.path);
     const merged = mergeLazyRewrite(original, a.content);
     if (!merged.ok) return fail(merged.reason, `rewrite_file ${a.path}: placeholders could not be merged`);
@@ -437,9 +469,11 @@ export const editLines: ToolDef<{ path: string; start_line: number; end_line: nu
   },
   async check(a, ctx) {
     fixEscapes(a);
+    if (a.start_line === 1 && a.end_line === 0 && (await createsFile(a.path, ctx))) return createFile.check!(a, ctx);
     return (await mustBeFile(a.path, ctx)) ?? mustUse("edit_lines", a.path, ctx);
   },
   async run(a, ctx) {
+    if ((await ctx.host.stat(a.path)) === null) return createFile.run(a, ctx);
     const r = applyLineRange(await ctx.host.readFile(a.path), a.start_line, a.end_line, a.content);
     if (!r.ok) return fail(`edit_lines failed: ${r.reason}`);
     return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${a.start_line}-${a.end_line}`, escapeNote(a), a.content);
@@ -464,7 +498,7 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
     if (!a.content.trim() && !/(^|\/)(__init__\.py|\.gitkeep|\.keep|py\.typed)$/.test(a.path)) {
       return `content is empty. Create ${a.path} with its complete content in this call.`;
     }
-    return placeholderIn(a.content, "", a.path);
+    return placeholderIn(a.content, "", a.path, ctx.todo) ?? moduleSystemProblem(a.path, a.content, "", ctx);
   },
   run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`, escapeNote(a)),
 };
