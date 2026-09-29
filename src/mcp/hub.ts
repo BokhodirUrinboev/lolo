@@ -116,11 +116,20 @@ export class McpHub {
     return this.started;
   }
 
+  /** Tools the user switched off in the /mcp menu, by ToolDef name (`mcp__server__tool`). */
+  disabled = new Set<string>();
+
   status(): { name: string; ok: boolean; tools: number; error?: string }[] {
     return this.servers.map((s) => ({ name: s.name, ok: !!s.client, tools: s.tools.length, error: s.error }));
   }
 
+  /** Tools offered to the agent. */
   tools(): McpToolDef[] {
+    return this.allTools().filter((t) => !this.disabled.has(t.name));
+  }
+
+  /** Every tool of the connected servers, including switched-off ones (for the /mcp menu). */
+  allTools(): McpToolDef[] {
     return this.servers.flatMap((s) => s.tools);
   }
 
@@ -213,7 +222,7 @@ export class McpHub {
             : { ok: await ctx.host.confirm(`Call MCP tool ${s.name}.${t.name} ${preview}?`) };
           if (!approval.ok) {
             const why = approval.feedback ? ` They said: ${approval.feedback}` : "";
-            return fail(`The user declined this MCP call.${why}`, `${name}: declined`);
+            return fail(`The user declined this MCP call.${why} Don't guess its result: if the task needs it, call done and say what is missing.`, `${name}: declined`);
           }
         }
         return hub.call(s, t.name, args, ctx.signal);

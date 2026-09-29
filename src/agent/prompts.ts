@@ -83,7 +83,7 @@ export const PLAN_REQUEST =
   "`reply`: only for chat: a short reply in the user's language (for an unclear message, one clarifying question); otherwise empty. " +
   '"do it", "start", "continue" or "yes" after a proposed plan means kind "task" with that plan\'s steps as todos. ' +
   "`todos`: only for a task: each todo is one concrete change, naming the file or symbol when known, " +
-  'e.g. "Return null from findUser() in src/users.ts when the id is empty". Use as few todos as possible: a single fix is 1 todo, most tasks need 1-3, never more than 6. Renaming a symbol everywhere is 1 todo, not one per file; creating a file is 1 todo together with its content. If the user only asks you to remember something, the one todo is to remember it, with no code changes. ' +
+  'e.g. "Return null from findUser() in src/users.ts when the id is empty". Use as few todos as possible: a single fix is 1 todo, most tasks need 1-3, never more than 6. Renaming a symbol everywhere is 1 todo, not one per file; moving or renaming a file is 1 todo (its imports are updated with it); creating a file is 1 todo together with its content. If the user only asks you to remember something, the one todo is to remember it, with no code changes. ' +
   "Do not add todos for reading, finding, checking or testing: you do that inside each todo, and project checks run automatically. " +
   "Do exactly what was asked with the simplest working solution: no extras (databases, auth, validation, logging, refactors) the user did not ask for. " +
   "To start a new project, use the platform's generator in the first todo (e.g. dotnet new, npm create).";

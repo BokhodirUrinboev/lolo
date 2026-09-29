@@ -51,30 +51,86 @@ export function allowedKinds(text: string): MessageKind[] {
   return ["task", "question", "chat"];
 }
 
+const FILE_NAME = /[\w./-]*[\w-]\.(?:tsx?|jsx?|mjs|cjs|py|cs|fs|go|java|kt|rs|rb|php|cpp|cc|c|hpp|h|swift|json|ya?ml|toml|md|html|css|scss|sql|csproj|sln)\b/gi;
+
+/** The files a todo names, e.g. ["src/tax.js"]. */
+export function namedFiles(todo: string): string[] {
+  return [...new Set(todo.match(FILE_NAME) ?? [])];
+}
+
+const CODE_IN_TODOS =
+  "Your todos contain lines of code. Each todo must be one sentence that describes a change and names its file; the code is written later, not in the plan. Reply with the plan JSON again.";
+
+function parsePlan(content: string): { goal: string; kind: MessageKind; reply: string; todos: string[] } {
+  const plan = { goal: "", kind: "task" as MessageKind, reply: "", todos: [] as string[] };
+  try {
+    const parsed = JSON.parse(/\{[\s\S]*\}/.exec(content)?.[0] ?? content);
+    plan.goal = String(parsed.goal ?? "");
+    if (parsed.kind === "chat" || parsed.kind === "question" || parsed.kind === "task") plan.kind = parsed.kind;
+    plan.reply = String(parsed.reply ?? "").trim();
+    if (Array.isArray(parsed.todos)) plan.todos = parsed.todos.map(String).map((t: string) => t.trim()).filter(Boolean);
+  } catch {
+    /* not JSON: an empty task plan, completed by the caller */
+  }
+  return plan;
+}
+
+/**
+ * Planners sometimes put code into the todo list, one line per todo ("Create IClock.cs with:",
+ * "```csharp", "{", "}"). Fenced blocks and lone brackets go back into the todo before them.
+ */
+function foldCode(todos: string[]): string[] {
+  const out: string[] = [];
+  let fenced = false;
+  for (const t of todos) {
+    const fence = /^\s*```/.test(t);
+    if (out.length && (fenced || fence || /^[\s{}()[\];,]+$/.test(t))) out[out.length - 1] += `\n${t}`;
+    else out.push(t);
+    if (fence) fenced = !fenced;
+  }
+  return out;
+}
+
+const sameFile = (a: string, b: string) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+
+/**
+ * Consecutive todos about the same single file become one. Planners split "create
+ * src/tax.js", "add computeTax to src/tax.js", "export it from src/tax.js" into three;
+ * a small model then creates an empty file, or does everything in the first todo and
+ * runs out of its steps.
+ */
+export function mergeTodos(todos: string[]): string[] {
+  const out: string[] = [];
+  for (const t of foldCode(todos)) {
+    const prev = out[out.length - 1];
+    const a = prev === undefined ? [] : namedFiles(prev);
+    const b = namedFiles(t);
+    // "Add ..." → "add ..." after "then"; a leading name ("TextUtils.cs: ...") keeps its case.
+    const next = /^[A-Z][a-z]+\s/.test(t) ? t[0].toLowerCase() + t.slice(1) : t;
+    if (a.length === 1 && b.length === 1 && sameFile(a[0], b[0])) out[out.length - 1] = `${prev.replace(/[.\s]+$/, "")}; then ${next}`;
+    else out.push(t);
+  }
+  return out;
+}
+
 export async function makePlan(provider: LLMProvider, prefix: ChatMessage[], signal?: AbortSignal, message = ""): Promise<Plan> {
   const request: ChatMessage = { role: "user", content: PLAN_REQUEST };
   const kinds = message ? allowedKinds(message) : (["task", "question", "chat"] as MessageKind[]);
   const planSchema: Schema = { ...PLAN_SCHEMA, properties: { ...PLAN_SCHEMA.properties, kind: { type: "string", enum: kinds } } };
   // xml mode means the endpoint can't constrain output; parse the JSON leniently instead.
   const schema = provider.profile.toolMode === "xml" ? undefined : planSchema;
-  const res = await provider.chat({ messages: mergeConsecutive([...prefix, request]), schema, signal, temperature: 0.1 });
-  let todos: string[] = [];
-  let goal = "";
-  let kind: MessageKind = "task";
-  let reply = "";
-  try {
-    const parsed = JSON.parse(/\{[\s\S]*\}/.exec(res.content)?.[0] ?? res.content);
-    goal = String(parsed.goal ?? "");
-    if (parsed.kind === "chat" || parsed.kind === "question" || parsed.kind === "task") kind = parsed.kind;
-    reply = String(parsed.reply ?? "").trim();
-    if (Array.isArray(parsed.todos)) todos = parsed.todos.map(String).map((t: string) => t.trim()).filter(Boolean);
-  } catch {
-    /* handled below */
+  const ask = (messages: ChatMessage[]) => provider.chat({ messages: mergeConsecutive(messages), schema, signal, temperature: 0.1 });
+  let res = await ask([...prefix, request]);
+  let { goal, kind, reply, todos } = parsePlan(res.content);
+  // Code lines as todos crowd out the real steps (6 at most): ask once more for sentences.
+  if (kind === "task" && foldCode(todos).length < todos.length) {
+    res = await ask([...prefix, request, { role: "assistant", content: res.content }, { role: "user", content: CODE_IN_TODOS }]);
+    ({ goal, kind, reply, todos } = parsePlan(res.content));
   }
   if (!kinds.includes(kind)) kind = kinds[0]; // unconstrained endpoints (xml mode)
   if (kind === "chat" && !reply) kind = kinds.includes("question") ? "question" : "chat"; // nothing to show: answer it properly
   if (kind === "chat" && !reply) reply = "Could you say a bit more about what you'd like me to do?";
   if (kind === "task" && !todos.length) todos = [goal || "Complete the task"];
-  todos = todos.slice(0, 6);
+  todos = mergeTodos(todos).slice(0, 6);
   return { kind, reply, goal, todos, messages: [request, { role: "assistant", content: JSON.stringify({ goal, kind, reply, todos }) }] };
 }

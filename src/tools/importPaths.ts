@@ -74,11 +74,15 @@ export async function importUpdates(ctx: ToolContext, from: string, to: string, 
     const last = oldMod.split(".").pop()!;
     const esc = oldMod.replace(/\./g, "\\.");
     const re = new RegExp(`^(\\s*(?:from|import)\\s+)${esc}(?=[\\s.,;]|$)`, "gm");
+    // `import pkg.mod` is used as `pkg.mod.name(...)`: those qualified uses change too.
+    const plainImport = new RegExp(`^\\s*import\\s+${esc}\\s*$`, "m");
+    const qualified = new RegExp(`(?<![\\w.])${esc}\\.(?=[A-Za-z_])`, "g");
     for (const f of await filesWithWord(ctx, last)) {
       if (!f.endsWith(".py")) continue;
       const text = await host.readFile(f).catch(() => undefined);
       if (text === undefined) continue;
-      const next = text.replace(re, `$1${newMod}`);
+      let next = text.replace(re, `$1${newMod}`);
+      if (plainImport.test(text)) next = next.replace(qualified, `${newMod}.`);
       if (next !== text) out.push({ path: f, content: next });
     }
   }

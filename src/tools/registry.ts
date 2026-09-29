@@ -1,3 +1,4 @@
+import { isTestFile, TESTS_PROTECTED } from "../agent/testGuard";
 import { enabledEditTools } from "../edit/formats";
 import { answer, done } from "./control";
 import { getDiagnostics } from "./diagnostics";
@@ -146,6 +147,11 @@ export class ToolRegistry {
       if ("error" in r) return { ok: false, error: r.error };
       if (tool.kind === "write" && writeForbidden(r.path)) return { ok: false, error: `Writing to ${r.path} is not allowed.` };
       args.path = r.path;
+    }
+    // "The tests fail, fix it": existing tests stay as they are (see agent/testGuard.ts).
+    const target = typeof args.path === "string" ? args.path : typeof args.from === "string" ? args.from : undefined;
+    if (ctx.protectTests && tool.kind === "write" && tool.name !== "create_file" && target && isTestFile(target) && (await ctx.host.stat(target)) === "file") {
+      return { ok: false, error: `${target} ${TESTS_PROTECTED}` };
     }
     const semantic = await tool.check?.(args, ctx);
     if (semantic) return { ok: false, error: semantic };

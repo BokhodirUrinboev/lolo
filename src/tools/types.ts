@@ -34,6 +34,10 @@ export interface ToolContext {
   largeRepo?: boolean;
   /** Text of the todo being worked on. */
   todo?: string;
+  /** The model's reasoning for the current call (e.g. which function it means). */
+  thought?: string;
+  /** The user's message is about failing tests (or forbids changing them): existing test files are read-only. */
+  protectTests?: boolean;
   /** Renames done by rename_symbol in this run (old → new): later todos about the same rename are already done. */
   renamed?: Map<string, string>;
 }

@@ -19,12 +19,15 @@ import { codeStillUses } from "../tools/symbolTools";
 import { EXTRACT_PROMPT } from "../tools/webTools";
 import type { WebConfig } from "../web/search";
 import { failureReport } from "../tools/testReport";
+import { missingUsings } from "../tools/missingImports";
+import { relativizePaths } from "../tools/output";
 import type { McpHub, McpToolDef } from "../mcp/hub";
 import { selectMcpTools } from "../mcp/select";
 import { Action, AgentMode, ToolRegistry } from "../tools/registry";
 import type { ToolContext, ToolDef, ToolResult } from "../tools/types";
 import { History, mergeConsecutive } from "./compaction";
 import { toolNeeds } from "./needs";
+import { protectTests } from "./testGuard";
 import { makePlan } from "./planner";
 import { PLAN_REQUEST, QUESTION_NOTE, systemPrompt, taskMessage, todoPrompt } from "./prompts";
 import { TrajectoryLog } from "./trajectoryLog";
@@ -135,6 +138,8 @@ function mcpSummary(tools: McpToolDef[]): string {
 
 /** Stop and ask the user after this many consecutive failed or invalid steps. */
 const MAX_CONSECUTIVE_FAILURES = 4;
+/** Consecutive reads (agent mode) after which the model is reminded to act. */
+const READS_BEFORE_NUDGE = 5;
 /** Extra attempts after a model generation failure. */
 const MODEL_RETRIES = 2;
 
@@ -199,7 +204,7 @@ export class Agent {
           (!t.available || t.available({ semantic } as ToolContext)) &&
           (t.name !== "done" || mode !== "ask"),
       );
-      const system = systemPrompt({ mode, model: provider.model, toolMode: profile.toolMode, environment: await environmentInfo(), toolList: this.registry.describe(modeTools), mcp: mcpSummary(mcpTools), rules: budget.fit("rules", rules.text), memory: budget.fit("rules", memory), verifyCommands: rules.verifyCommands, repoMap });
+      const system = systemPrompt({ mode, model: provider.model, toolMode: profile.toolMode, environment: await environmentInfo(host.shell), toolList: this.registry.describe(modeTools), mcp: mcpSummary(mcpTools), rules: budget.fit("rules", rules.text), memory: budget.fit("rules", memory), verifyCommands: rules.verifyCommands, repoMap });
       const collected = await collectContext(host, editor, Math.floor(budget.tokens("files") / 3));
       const context = [mentions.context, collected].filter(Boolean).join("\n\n");
       const prefix: ChatMessage[] = [
@@ -261,6 +266,7 @@ export class Agent {
       // 4. Execute todos.
       const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: this.deps.commandAllowlist, signal, readOnly: execMode === "ask", processes, semantic,
         web: this.deps.web,
+        protectTests: protectTests(task),
         largeRepo: !this.deps.nested && (await listFiles(host)).filter((f) => languageFor(f)).length >= LARGE_REPO_FILES,
         explore: this.deps.nested ? undefined : (question, sig) => this.explore(question, emit, sig),
         extract: (text, question, sig) => this.extract(text, question, stats, sig),
@@ -334,12 +340,16 @@ export class Agent {
     let seen = new Set<string>();
     let changedInTodo = false;
     let noopStreak = 0;
+    /** Consecutive read-only calls in agent mode; small models keep reading instead of editing. */
+    let readStreak = 0;
+    /** Write calls that were applied in this todo (identical repeats are loops). */
+    const appliedWrites = new Set<string>();
     /** Project checks after this todo changed files: true when they pass (or, if allowed, when there are none). */
     const checksPass = async (allowNoChecks: boolean) => {
       if (!changedInTodo) return false;
       const checks = s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host);
       if (!checks.length) return allowNoChecks;
-      return !(await this.verify(checks, emit));
+      return !(await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f))));
     };
     const completeAuto = (why: string) => {
       const summary = `Completed: ${todos[index]}.`;
@@ -455,11 +465,15 @@ export class Agent {
       const { tool, args } = checked;
 
       // Stuck detection: a call already made since the last write → switch strategy instead of executing it again.
+      // An identical write that was already applied in this todo counts too (an "append" edit repeated forever).
       const key = tool.name + JSON.stringify(args, Object.keys(args).sort());
-      if (seen.has(key)) {
+      const rewrite = appliedWrites.has(key);
+      if (seen.has(key) || rewrite) {
         repeats++;
-        let msg = "You already made exactly this call and got its result above. Do something different.";
-        if (tool.kind === "write" && typeof args.path === "string") {
+        let msg = rewrite
+          ? "You already made exactly this change and it was applied: the file contains it now. If the todo is complete, call done; otherwise do the next step."
+          : "You already made exactly this call and got its result above. Do something different.";
+        if (!rewrite && tool.kind === "write" && typeof args.path === "string") {
           ctx.edits.forceLineRange(args.path);
           msg += ` ${args.path} is now in line mode: read_file shows line numbers, then use edit_lines.`;
         }
@@ -479,7 +493,7 @@ export class Agent {
         // Checks from rules, else inferred from project files (detected now, so projects created in this run count).
         const checks = changedInTodo ? (s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host)) : [];
         if (checks.length) {
-          const failed = await this.verify(checks, emit);
+          const failed = await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f)));
           if (failed) {
             repairs++;
             lastFailure = step;
@@ -501,6 +515,7 @@ export class Agent {
         // Re-reading after any write attempt (even a rejected one) is legitimate.
         for (const k of seen) if (k.startsWith("read_file")) seen.delete(k);
       }
+      ctx.thought = action.thought;
       const result = await tool.run(args, ctx);
       if (result.noop) {
         stats.editCalls--;
@@ -516,7 +531,11 @@ export class Agent {
 
       let observation = result.output;
       if (result.changed?.length) {
-        stats.editsApplied++;
+        // run_command may change files too (added using directives): not an edit call of the model.
+        if (tool.kind === "write") {
+          stats.editsApplied++;
+          appliedWrites.add(key);
+        }
         lastProgress = step;
         // Agent files (.agent/memory.md) don't need the project's build/tests.
         if (result.changed.some((f) => !f.startsWith(".agent/"))) changedInTodo = true;
@@ -534,6 +553,10 @@ export class Agent {
         } else {
           repairs = 0;
         }
+      }
+      readStreak = mode === "agent" && tool.kind === "read" ? readStreak + 1 : 0;
+      if (readStreak === READS_BEFORE_NUDGE) {
+        observation += `\n\n[That is ${READS_BEFORE_NUDGE} reads in a row. If you know what to change, change it now; read only what is still missing.]`;
       }
       history.add(assistant, observation, result.summary);
       // A todo that is just "Run `cmd`" is done once that command succeeded; small models
@@ -628,12 +651,26 @@ export class Agent {
     return notes.length ? `\n\n${notes.join("\n")}` : "";
   }
 
-  /** Runs verify commands from rules; returns failure text, or undefined when all pass. */
-  private async verify(commands: string[], emit: (e: AgentEvent) => void): Promise<string | undefined> {
+  /**
+   * Runs verify commands from rules; returns failure text, or undefined when all pass.
+   * Missing C# using directives are added by code first (`onChange` gets those files).
+   */
+  private async verify(commands: string[], emit: (e: AgentEvent) => void, onChange?: (files: string[]) => void): Promise<string | undefined> {
+    const { host } = this.deps;
     for (const cmd of commands) {
-      const r = await this.deps.host.runCommand(cmd, undefined, { timeoutMs: 300_000 }); // first build may restore packages
-      const layout = r.exitCode !== 0 && /\bdotnet\b/.test(cmd) ? nestedProjectProblem(await listFiles(this.deps.host)) : undefined;
-      const output = `$ ${cmd}\nexit code ${r.exitCode}\n${r.exitCode === 0 ? r.output : failureReport(r.output, this.deps.host.root, 80)}${layout ? `\n\nLikely cause: ${layout}` : ""}`;
+      let r = await host.runCommand(cmd, undefined, { timeoutMs: 300_000 }); // first build may restore packages
+      let fixed = "";
+      if (r.exitCode !== 0) {
+        const fix = await missingUsings(r.output, host.root, (p) => host.readFile(p));
+        if (fix.changes.length && (await host.proposeWrites(fix.changes, "add missing using directives")).applied) {
+          onChange?.(fix.changes.map((c) => c.path));
+          fixed = `${fix.note}\n`;
+          r = await host.runCommand(cmd, undefined, { timeoutMs: 300_000 });
+        }
+      }
+      const layout = r.exitCode !== 0 && /\bdotnet\b/.test(cmd) ? nestedProjectProblem(await listFiles(host)) : undefined;
+      const body = relativizePaths(r.exitCode === 0 ? r.output : failureReport(r.output, host.root, 80), host.root);
+      const output = `${fixed}$ ${cmd}\nexit code ${r.exitCode}\n${body}${layout ? `\n\nLikely cause: ${layout}` : ""}`;
       emit({ type: "verify", ok: r.exitCode === 0, output });
       if (r.exitCode !== 0) return output;
     }

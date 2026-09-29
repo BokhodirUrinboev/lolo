@@ -13,6 +13,16 @@ export interface WebConfig {
   /** SearXNG base URL, e.g. http://localhost:8080 (the instance must allow `format=json`). */
   searxngUrl?: string;
   apiKey?: string;
+  /** Recorded answers instead of the network (eval tasks, tests). */
+  replay?: WebRecording;
+}
+
+/** Search results and pages served instead of the network. */
+export interface WebRecording {
+  /** Tried in order: the first entry whose `match` (a case-insensitive regex) matches the query; no `match` = any query. */
+  search: { match?: string; results: SearchResult[] }[];
+  /** Pages by URL. */
+  pages: Record<string, { title?: string; text: string }>;
 }
 
 export interface SearchResult {
@@ -25,6 +35,7 @@ const TIMEOUT_MS = 15_000;
 const MAX_RESULTS = 6;
 
 export async function webSearch(cfg: WebConfig, query: string, signal?: AbortSignal): Promise<SearchResult[]> {
+  if (cfg.replay) return (cfg.replay.search.find((e) => !e.match || new RegExp(e.match, "i").test(query))?.results ?? []).slice(0, MAX_RESULTS);
   const s = signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS);
   let results: SearchResult[];
   try {

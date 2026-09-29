@@ -1,0 +1,238 @@
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { describe, expect, it } from "vitest";
+import { mergeTodos, namedFiles } from "../src/agent/planner";
+import { isTestFile, protectTests } from "../src/agent/testGuard";
+import { EditState } from "../src/edit/formats";
+import { fuzzyApply } from "../src/edit/fuzzyApply";
+import { NodeHost } from "../src/host/nodeHost";
+import { resolveProfile } from "../src/providers/modelProfiles";
+import { createFile, editFile } from "../src/tools/fileTools";
+import { addUsing, missingUsings, workspacePath } from "../src/tools/missingImports";
+import { relativizePaths } from "../src/tools/output";
+import { ToolRegistry } from "../src/tools/registry";
+import type { ToolContext } from "../src/tools/types";
+
+const STOCK = `function sell(inv, sku, qty) {
+  const key = sku.trim();
+  inv.stock.set(key, inv.stock.get(key) - qty);
+}
+
+function restock(inv, sku, qty) {
+  const key = sku.trim();
+  inv.stock.set(key, inv.stock.get(key) - qty);
+}
+`;
+
+function workspace(files: Record<string, string>) {
+  const root = mkdtempSync(path.join(tmpdir(), "lolo-rep-"));
+  for (const [f, c] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
+    writeFileSync(path.join(root, f), c);
+  }
+  const ctx: ToolContext = { host: new NodeHost(root, { autoApprove: true }), profile: resolveProfile("qwen2.5-coder:7b"), edits: new EditState(), commandAllowlist: [] };
+  return { root, ctx, read: (f: string) => readFileSync(path.join(root, f), "utf8") };
+}
+
+describe("ambiguous search", () => {
+  const search = "  inv.stock.set(key, inv.stock.get(key) - qty);";
+
+  it("reports every match, and applies the one picked with `at`", () => {
+    const r = fuzzyApply(STOCK, search, search.replace("-", "+"));
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.matches).toEqual([3, 8]);
+    const picked = fuzzyApply(STOCK, search, search.replace("-", "+"), { at: 8 });
+    expect(picked.ok && picked.content.split("\n")[7]).toContain("+ qty");
+    expect(picked.ok && picked.content.split("\n")[2]).toContain("- qty");
+  });
+
+  it("edits the match inside the function the todo names", async () => {
+    const { ctx, read } = workspace({ "src/inv.js": STOCK });
+    ctx.todo = "Make restock() in src/inv.js raise the stock";
+    const r = await editFile.run({ path: "src/inv.js", search, replace: search.replace("-", "+") }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("changed the one in restock at line 8");
+    expect(read("src/inv.js").split("\n")[7]).toContain("+ qty");
+    expect(read("src/inv.js").split("\n")[2]).toContain("- qty");
+  });
+
+  it("limits all=true to the function the todo is about", async () => {
+    const { ctx, read } = workspace({ "src/inv.js": STOCK });
+    ctx.todo = "Edit the restock function in src/inv.js to raise the stock";
+    const r = await editFile.run({ path: "src/inv.js", search: search.trim(), replace: search.trim().replace("-", "+"), all: true }, ctx);
+    expect(r.output).toContain("only in restock");
+    expect(read("src/inv.js").split("\n")[2]).toContain("- qty");
+    expect(read("src/inv.js").split("\n")[7]).toContain("+ qty");
+    // A rename-style all=true that the todo doesn't tie to one function changes everything.
+    const { ctx: c2, read: r2 } = workspace({ "src/inv.js": STOCK });
+    c2.todo = "Rename the variable key to id";
+    await editFile.run({ path: "src/inv.js", search: "key", replace: "id", all: true }, c2);
+    expect(r2("src/inv.js")).not.toContain("key");
+  });
+
+  it("refuses an append edit that is already in place (degenerate repeats)", () => {
+    const file = "class A {\n  toString() { return 'a'; }\n}\n";
+    const edit = ["  toString() { return 'a'; }", "  toString() { return 'a'; }\n\n  equals(o) { return o instanceof A; }"] as const;
+    const once = fuzzyApply(file, ...edit);
+    expect(once.ok).toBe(true);
+    const twice = fuzzyApply(once.ok ? once.content : "", ...edit);
+    expect(!twice.ok && twice.reason).toMatch(/already applied/);
+  });
+
+  it("otherwise lists the places with their functions", async () => {
+    const { ctx } = workspace({ "src/inv.js": STOCK });
+    ctx.todo = "Fix the stock update";
+    const r = await editFile.run({ path: "src/inv.js", search, replace: "x" }, ctx);
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("matches 2 places: line 3 (in sell), line 8 (in restock)");
+  });
+});
+
+describe("replace that repeats the lines around search", () => {
+  it("replaces the repeated closing lines instead of duplicating them (C#)", async () => {
+    const { ctx, read } = workspace({ "SystemClock.cs": "namespace Greetings;\n\npublic class SystemClock\n{\n    public DateTime Now => DateTime.Now;\n}\n" });
+    const r = await editFile.run(
+      { path: "SystemClock.cs", search: "public class SystemClock\n{", replace: "public class SystemClock : IClock\n{\n    public DateTime Now => DateTime.Now;\n}" },
+      ctx,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.output).toMatch(/replaced, not duplicated|replaced the whole old one/);
+    expect(read("SystemClock.cs")).toBe("namespace Greetings;\n\npublic class SystemClock : IClock\n{\n    public DateTime Now => DateTime.Now;\n}\n");
+  });
+
+  it("handles a replace that starts with the line before search (JS)", async () => {
+    const { ctx, read } = workspace({ "a.js": "function add(a, b) {\n  return a - b;\n}\n\nmodule.exports = { add };\n" });
+    const r = await editFile.run({ path: "a.js", search: "  return a - b;\n}", replace: "function add(a, b) {\n  return a + b;\n}" }, ctx);
+    expect(r.ok).toBe(true);
+    expect(read("a.js")).toBe("function add(a, b) {\n  return a + b;\n}\n\nmodule.exports = { add };\n");
+  });
+
+  it("replaces the whole function when `replace` is a new version of the one `search` starts", async () => {
+    const eu = "const { formatPrice } = require(\"./format\");\n\nfunction euPriceTag(product) {\n  return `${product.name} ${formatPrice(product.cents)}`;\n}\n\nmodule.exports = { euPriceTag };\n";
+    const { ctx, read } = workspace({ "src/eu.js": eu });
+    const r = await editFile.run(
+      { path: "src/eu.js", search: "function euPriceTag(product)", replace: "function euPriceTag(product) {\n  return `${product.name} ${formatPrice(product.cents, \"EUR\")}`;\n}" },
+      ctx,
+    );
+    expect(r.output).toContain("replaced the whole old one");
+    expect(read("src/eu.js")).toBe(eu.replace("formatPrice(product.cents)", 'formatPrice(product.cents, "EUR")'));
+    // An insertion at the top of a body (unbalanced replace) is left as it is.
+    const { ctx: c2, read: r2 } = workspace({ "a.js": "function f(x) {\n  return x;\n}\n" });
+    await editFile.run({ path: "a.js", search: "function f(x) {", replace: "function f(x) {\n  if (!x) return 0;" }, c2);
+    expect(r2("a.js")).toBe("function f(x) {\n  if (!x) return 0;\n  return x;\n}\n");
+  });
+
+  it("leaves valid edits alone, even when they add a similar line", async () => {
+    const { ctx, read } = workspace({ "b.js": "function f() {\n  a();\n}\n" });
+    await editFile.run({ path: "b.js", search: "  a();", replace: "  a();\n  a();" }, ctx);
+    expect(read("b.js")).toBe("function f() {\n  a();\n  a();\n}\n");
+  });
+});
+
+describe("placeholders in new code", () => {
+  it("refuses stubs like `// existing implementation` in created files and edits", async () => {
+    const { ctx } = workspace({ "src/users.js": "function a() {\n  return 1;\n}\n// existing implementation note\n" });
+    const stub = "module.exports = {\n  validateEmail(email) {\n    // existing implementation\n  },\n};\n";
+    expect(await createFile.check!({ path: "src/validators.js", content: stub }, ctx)).toMatch(/placeholder/);
+    expect(await createFile.check!({ path: "src/ok.js", content: "module.exports = { a: 1 };\n" }, ctx)).toBeUndefined();
+    expect(await editFile.check!({ path: "src/users.js", search: "  return 1;", replace: "  // ... rest of the code ...\n  return 2;" }, ctx)).toMatch(/placeholder/);
+    // A comment that is already in the file is not a new hole.
+    expect(await editFile.check!({ path: "src/users.js", search: "  return 1;", replace: "  return 1; // existing implementation note" }, ctx)).toBeUndefined();
+  });
+});
+
+describe("test guard", () => {
+  it("protects tests when the message is about failing tests or forbids changing them", () => {
+    for (const m of [
+      "`npm test` fails. Find out why and fix the code in src/ (don't change the tests).",
+      "My uncommitted change to src/rate.js broke the tests. Use git diff to see what I changed.",
+      "Cart.total() ignores item quantity. Fix it so the tests pass.",
+      "the tests are still failing",
+      "python3 -m unittest fails. Fix inventory.py (do not modify the tests)",
+    ]) expect(protectTests(m), m).toBe(true);
+    for (const m of [
+      "Add a method applyDiscount(percent) to Cart. Add a test for it in test/cart.test.js.",
+      "Rename the class ShoppingCart to Basket everywhere: its definition, its export and every use in src/ and test/.",
+      "Rename the class Invoice to Bill everywhere (the billing package and the tests).",
+      "The test for parseDate fails because the test is wrong: update the test to expect UTC.",
+      "Implement median(xs) in stats.py.",
+    ]) expect(protectTests(m), m).toBe(false);
+    expect(["test/a.test.js", "src/a.spec.ts", "test_config.py", "pkg/words_test.go", "Api.Tests/UsersTests.cs", "tests/helpers.js"].every(isTestFile)).toBe(true);
+    expect(["src/test-utils-free.js", "src/contest.js", "attest.py"].some(isTestFile)).toBe(false);
+  });
+
+  it("refuses edits to existing tests while protected, not new files", async () => {
+    const { ctx } = workspace({ "src/a.js": "exports.a = 1;\n", "test/a.test.js": "// test\n" });
+    ctx.protectTests = true;
+    const reg = new ToolRegistry();
+    const edit = await reg.check({ thought: "", tool: "edit", args: { path: "test/a.test.js", search: "// test", replace: "// x" } }, reg.all, ctx);
+    expect(!edit.ok && edit.error).toContain("is a test");
+    expect((await reg.check({ thought: "", tool: "edit", args: { path: "src/a.js", search: "1", replace: "2" } }, reg.all, ctx)).ok).toBe(true);
+    expect((await reg.check({ thought: "", tool: "create_file", args: { path: "test/b.test.js", content: "// new\n" } }, reg.all, ctx)).ok).toBe(true);
+  });
+});
+
+describe("mergeTodos", () => {
+  it("merges consecutive todos about the same single file", () => {
+    const todos = [
+      "Create a new file src/tax.js.",
+      "Add the function computeTax(amount) to src/tax.js.",
+      "Export the computeTax function from src/tax.js.",
+      "Replace the inline tax computation in src/order.js with a call to computeTax(amount).",
+      "Replace the inline tax computation in src/invoice.js with a call to computeTax(amount).",
+    ];
+    expect(mergeTodos(todos)).toEqual([
+      "Create a new file src/tax.js; then add the function computeTax(amount) to src/tax.js; then export the computeTax function from src/tax.js.",
+      todos[3],
+      todos[4],
+    ]);
+  });
+
+  it("folds code the planner split into todos back into its todo", () => {
+    const todos = ["Create a new file IClock.cs with the following content:", "```csharp", "public interface IClock", "{", "DateTime Now { get; }", "}", "```", "Make SystemClock implement IClock"];
+    expect(mergeTodos(todos)).toEqual([
+      "Create a new file IClock.cs with the following content:\n```csharp\npublic interface IClock\n{\nDateTime Now { get; }\n}\n```",
+      "Make SystemClock implement IClock",
+    ]);
+  });
+
+  it("keeps todos about different or several files apart", () => {
+    const todos = ["Add applyDiscount(percent) to Cart in src/cart.js", "Add a test for it in test/cart.test.js", "Update src/a.js and src/b.js", "Fix src/a.js"];
+    expect(mergeTodos(todos)).toEqual(todos);
+    expect(namedFiles("Paging.cs: fix PageCount in Paging.cs")).toEqual(["Paging.cs"]);
+    expect(mergeTodos(["Fix PageCount in Paging.cs", "Paging.cs: throw for size 0"])).toEqual(["Fix PageCount in Paging.cs; then Paging.cs: throw for size 0"]);
+  });
+});
+
+describe("missing using directives", () => {
+  it("adds after the last using, or before a file-scoped namespace", () => {
+    expect(addUsing("using System;\n\nnamespace Demo;\n", "System.Text")).toBe("using System;\nusing System.Text;\n\nnamespace Demo;\n");
+    expect(addUsing("namespace Demo;\r\n\r\nclass A {}\r\n", "System.Text.RegularExpressions")).toBe("using System.Text.RegularExpressions;\r\n\r\nnamespace Demo;\r\n\r\nclass A {}\r\n");
+    expect(addUsing("using System.Text;\nclass A {}\n", "System.Text")).toBe("using System.Text;\nclass A {}\n");
+  });
+
+  it("reads CS0103/CS0246 errors with absolute Windows or relative paths", async () => {
+    const root = "C:\\Users\\me\\AppData\\Local\\Temp\\eval-x";
+    const out = [
+      "C:\\Users\\me\\AppData\\Local\\Temp\\eval-x\\TextUtils.cs(14,16): error CS0103: The name 'Regex' does not exist in the current context [C:\\Users\\me\\AppData\\Local\\Temp\\eval-x\\Text.csproj]",
+      "src/Report.cs(3,9): error CS0246: The type or namespace name 'StringBuilder' could not be found (are you missing a using directive or an assembly reference?)",
+      "src/Report.cs(4,9): error CS0246: The type or namespace name 'Newtonsoft' could not be found",
+    ].join("\n");
+    const files: Record<string, string> = { "TextUtils.cs": "namespace Demo;\n", "src/Report.cs": "namespace Demo;\n" };
+    const r = await missingUsings(out, root, async (p) => files[p]);
+    expect(r.changes.map((c) => c.path)).toEqual(["TextUtils.cs", "src/Report.cs"]);
+    expect(r.changes[0].content).toBe("using System.Text.RegularExpressions;\n\nnamespace Demo;\n");
+    expect(r.note).toContain("`using System.Text;` to src/Report.cs");
+    expect(workspacePath("D:\\other\\A.cs", root)).toBeUndefined();
+  });
+});
+
+describe("relativizePaths", () => {
+  it("turns absolute workspace paths into relative ones with forward slashes", () => {
+    const root = "C:\\Users\\me\\proj";
+    expect(relativizePaths("C:\\Users\\me\\proj\\src\\A.cs(3,5): error CS1002 [C:\\Users\\me\\proj\\A.csproj]", root)).toBe("src/A.cs(3,5): error CS1002 [A.csproj]");
+    expect(relativizePaths("at /home/u/app/src/a.js:10:3", "/home/u/app")).toBe("at src/a.js:10:3");
+    expect(relativizePaths("c:/users/me/proj/x.py line 3", root)).toBe("x.py line 3");
+  });
+});

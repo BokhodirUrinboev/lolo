@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import * as path from "node:path";
 import { ensureAgentDir } from "../edit/agentDir";
 import { htmlTitle, htmlToMarkdown } from "./html";
+import type { WebRecording } from "./search";
 
 /**
  * Downloads a web page for the model: http(s) only, no local or private network
@@ -38,8 +39,8 @@ export function privateAddress(ip: string): boolean {
   return true;
 }
 
-/** Why `url` may not be fetched, or undefined when it is a public http(s) address. */
-export async function blockedReason(url: string): Promise<string | undefined> {
+/** Why `url` may not be fetched, or undefined when it is a public http(s) address. `resolve: false` skips the DNS check (recorded pages). */
+export async function blockedReason(url: string, opts: { resolve?: boolean } = {}): Promise<string | undefined> {
   let u: URL;
   try {
     u = new URL(url);
@@ -50,6 +51,7 @@ export async function blockedReason(url: string): Promise<string | undefined> {
   if (u.username || u.password) return "URLs with credentials are not fetched";
   const host = u.hostname.replace(/^\[|\]$/g, "");
   if (/^localhost$|\.localhost$|\.local$|\.internal$/i.test(host)) return "local addresses are not fetched";
+  if (opts.resolve === false) return undefined;
   let addrs: string[];
   try {
     addrs = isIP(host) ? [host] : (await lookup(host, { all: true })).map((a) => a.address);
@@ -60,7 +62,13 @@ export async function blockedReason(url: string): Promise<string | undefined> {
   return undefined;
 }
 
-export async function fetchPage(url: string, root?: string, signal?: AbortSignal): Promise<Page> {
+export async function fetchPage(url: string, root?: string, signal?: AbortSignal, replay?: WebRecording): Promise<Page> {
+  if (replay) {
+    const key = (u: string) => u.replace(/#.*$/, "").replace(/\/+$/, "");
+    const hit = Object.entries(replay.pages).find(([u]) => key(u) === key(url));
+    if (!hit) throw new Error("HTTP 404 Not Found");
+    return { url, title: hit[1].title ?? "", text: hit[1].text };
+  }
   const cacheFile = root ? path.join(root, ".agent", "cache", "web", createHash("sha1").update(url).digest("hex") + ".json") : undefined;
   if (cacheFile) {
     try {

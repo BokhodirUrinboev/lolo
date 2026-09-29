@@ -1,8 +1,8 @@
 import { listFiles } from "../context/repoMap";
 import { fileSymbols, languageFor } from "../context/treeSitter";
-import { applyLineRange, editToolFor, EditTool, mergeLazyRewrite } from "../edit/formats";
-import { fuzzyApply } from "../edit/fuzzyApply";
-import { checkEditSyntax } from "../edit/syntaxGuard";
+import { applyLineRange, editToolFor, EditTool, isLazyPlaceholder, mergeLazyRewrite } from "../edit/formats";
+import { fuzzyApply, overlapCandidates, reindent } from "../edit/fuzzyApply";
+import { checkEditSyntax, findImbalance } from "../edit/syntaxGuard";
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
 import { IGNORED_DIRS } from "./paths";
 import { symbolSummary } from "./output";
@@ -207,6 +207,54 @@ export const listDir: ToolDef<{ path?: string }> = {
   },
 };
 
+/**
+ * A `// existing implementation` / `// ... rest of the code` line that `before` doesn't have:
+ * in new code it is a hole, not code (a moved function written as a stub). Error text, or undefined.
+ */
+function placeholderIn(text: string, before: string, path: string): string | undefined {
+  if (!languageFor(path) && !BRACE_FILE.test(path)) return undefined;
+  const known = new Set(toLf(before).split("\n").map((l) => l.trim()));
+  const hole = toLf(text).split("\n").find((l) => isLazyPlaceholder(l, known));
+  return hole
+    ? `\`${hole.trim()}\` is a placeholder, not code. Write the real code${before ? "" : " (read the file the code comes from, and copy it)"}; nothing may be left out.`
+    : undefined;
+}
+
+interface Def {
+  name: string;
+  line: number;
+  endLine: number;
+}
+
+/** The innermost function/class around each line (tree-sitter); undefined outside any, or without a grammar. */
+async function enclosingDefs(path: string, text: string, lines: number[]): Promise<(Def | undefined)[]> {
+  const defs = (await fileSymbols(path, text))?.defs ?? [];
+  return lines.map((l) => defs.filter((d) => d.line <= l && d.endLine >= l).sort((x, y) => x.endLine - x.line - (y.endLine - y.line))[0]);
+}
+
+/**
+ * `search` is the first line(s) of a function or class and `replace` a complete new version of
+ * it (balanced brackets, same name): the model means to replace the whole definition. Applied
+ * literally, the old body would stay behind as a dead `{ ... }` block, which still parses in JS.
+ * Returns the file with the whole definition replaced, when that parses; brace languages only.
+ */
+async function redefinition(path: string, original: string, search: string, replace: string, startLine: number) {
+  if (!BRACE_FILE.test(path)) return undefined;
+  const lines = toLf(original).split("\n");
+  const def = ((await fileSymbols(path, original))?.defs ?? []).find((d) => d.line === startLine && d.endLine > d.line);
+  const s = toLf(search).replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "");
+  const r = toLf(replace).replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "");
+  if (!def || s.split("\n").length >= def.endLine - def.line + 1) return undefined; // search already spans it
+  const rLines = r.split("\n");
+  if (!rLines[0].includes(def.name) || !r.includes("{") || findImbalance(r) || rLines.length < 2) return undefined;
+  const body = reindent(r, [rLines[0]], [lines[def.line - 1]]);
+  const content = fromLf([...lines.slice(0, def.line - 1), ...body, ...lines.slice(def.endLine)].join("\n"), detectEol(original));
+  if (await checkEditSyntax(path, original, content)) return undefined;
+  return { content, name: def.name, from: def.line, to: def.endLine };
+}
+
+const BRACE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|cs|java|kt|go|rs|c|h|cpp|hpp|cc|swift|php|dart|scala)$/i;
+
 /** `fragment`: the text the model wrote for this edit (to spot a reply cut off by an unescaped quote). */
 async function write(ctx: ToolContext, path: string, content: string, isNew: boolean, reason: string, note = "", fragment = content): Promise<ToolResult> {
   const before = isNew ? undefined : await ctx.host.readFile(path);
@@ -247,13 +295,59 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
     properties: { path: { type: "string" }, search: { type: "string", minLength: 1 }, replace: { type: "string" }, all: { type: "boolean" } },
     required: ["path", "search", "replace"],
   },
-  check: (a, ctx) => mustBeFile(a.path, ctx),
+  async check(a, ctx) {
+    return (await mustBeFile(a.path, ctx)) ?? placeholderIn(a.replace, await ctx.host.readFile(a.path), a.path);
+  },
   async run(a, ctx) {
     const original = await ctx.host.readFile(a.path);
-    const r = fuzzyApply(original, a.search, a.replace, { all: a.all });
+    let r = fuzzyApply(original, a.search, a.replace, { all: a.all });
+    let where = "";
+    // Several matches: the ones inside the function the todo (or the model's thought) names are meant.
+    const context = `${ctx.todo ?? ""}\n${ctx.thought ?? ""}`;
+    const named = (d: Def | undefined) => !!d && new RegExp(`(?<![\\w$])${d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`).test(context);
+    if (!r.ok && r.matches) {
+      const matches = r.matches;
+      const owners = await enclosingDefs(a.path, original, matches);
+      const inNamed = matches.filter((_, i) => named(owners[i]));
+      const picked = inNamed.length === 1 ? fuzzyApply(original, a.search, a.replace, { at: inNamed[0] }) : undefined;
+      if (picked?.ok) {
+        where = ` (\`search\` matched ${matches.length} places; changed the one in ${owners[matches.indexOf(inNamed[0])]!.name} at line ${inNamed[0]})`;
+        r = picked;
+      } else {
+        const places = matches.map((l, i) => `line ${l}${owners[i] ? ` (in ${owners[i]!.name})` : ""}`).join(", ");
+        r = { ...r, reason: `\`search\` matches ${matches.length} places: ${places}. Include the line above or below it (e.g. the function's first line) so it matches only one.` };
+      }
+    } else if (r.ok && a.all && (r.replaced?.length ?? 0) > 1) {
+      // all=true across functions while the todo is about one of them: only that one (the others were collateral).
+      const owners = await enclosingDefs(a.path, original, r.replaced!);
+      const targets = [...new Set(owners.filter(named))];
+      if (targets.length === 1 && owners.some((o) => o !== targets[0])) {
+        const limited = fuzzyApply(original, a.search, a.replace, { all: true, within: [targets[0]!.line, targets[0]!.endLine] });
+        if (limited.ok && limited.replaced?.length) {
+          where = ` (only in ${targets[0]!.name}, which the task is about: ${limited.replaced.length} of ${r.replaced!.length} occurrences)`;
+          r = limited;
+        }
+      }
+    }
     if (r.ok) {
-      const note = r.strategy === "exact" ? "" : ` (matched ${r.strategy} at line ${r.startLine}, score ${r.score})`;
-      return write(ctx, a.path, r.content, false, `edit ${a.path}`, note, a.replace);
+      let note = where || (r.strategy === "exact" ? "" : ` (matched ${r.strategy} at line ${r.startLine}, score ${r.score})`);
+      let content = r.content;
+      const whole = a.all ? undefined : await redefinition(a.path, original, a.search, a.replace, r.startLine);
+      if (whole) {
+        content = whole.content;
+        note += ` (\`replace\` is a complete new ${whole.name}, so it replaced the whole old one, lines ${whole.from}-${whole.to})`;
+      }
+      // `replace` repeating the lines around `search` (a second closing brace): replace them instead, if that parses.
+      if (!whole && !a.all && (await checkEditSyntax(a.path, original, content, a.replace))) {
+        const searchLines = toLf(a.search).replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "").split("\n").length;
+        for (const c of overlapCandidates(original, content, r.startLine, searchLines)) {
+          if (await checkEditSyntax(a.path, original, c)) continue;
+          content = c;
+          note += " (your `replace` repeated lines next to `search`; they were replaced, not duplicated)";
+          break;
+        }
+      }
+      return write(ctx, a.path, content, false, `edit ${a.path}`, note, a.replace);
     }
     const switched = ctx.edits.recordFailure(a.path);
     let out = `Edit failed: ${r.reason}`;
@@ -327,7 +421,7 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
     if (!a.content.trim() && !/(^|\/)(__init__\.py|\.gitkeep|\.keep|py\.typed)$/.test(a.path)) {
       return `content is empty. Create ${a.path} with its complete content in this call.`;
     }
-    return undefined;
+    return placeholderIn(a.content, "", a.path);
   },
   run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`),
 };

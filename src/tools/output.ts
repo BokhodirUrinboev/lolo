@@ -41,6 +41,20 @@ export function truncateOutput(text: string, maxLines = 120): string {
   ].join("\n");
 }
 
+/**
+ * Absolute paths inside the workspace → workspace-relative with forward slashes: shorter,
+ * and what the tools take (`C:\Users\me\app\src\A.cs(3,5)` → `src/A.cs(3,5)`).
+ */
+export function relativizePaths(text: string, root: string): string {
+  const variants = [...new Set([root, root.replace(/\\/g, "/"), root.replace(/\//g, "\\")])].map((v) => v.replace(/[\\/]+$/, ""));
+  let out = text;
+  for (const v of variants) {
+    const re = new RegExp(`${v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\\\/]([^\\s:()\\[\\]'"]*)`, /^[a-zA-Z]:/.test(v) ? "gi" : "g");
+    out = out.replace(re, (_, rest: string) => rest.replace(/\\/g, "/"));
+  }
+  return out;
+}
+
 /** Cheap symbol summary for compaction notes, e.g. "class UserService, fn getById". */
 export function symbolSummary(text: string, max = 5): string {
   const names: string[] = [];
