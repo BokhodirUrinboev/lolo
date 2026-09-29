@@ -1,0 +1,16 @@
+{
+  "task": "Create a ticket in the tracker for the TODO comment in src/cache.js: the title is the TODO's text and the file is src/cache.js. Don't change any code.",
+  "check": "node verify_ticket.cjs && git diff --quiet -- src test",
+  "mcp": {
+    "tracker": {
+      "command": "node",
+      "args": [
+        "{task}/../../mcp/tracker.cjs"
+      ],
+      "env": {
+        "TRACKER_STATE": "{workspace}/.agent/cache/tracker.json"
+      }
+    }
+  },
+  "approve": true
+}

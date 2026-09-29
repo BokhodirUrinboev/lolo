@@ -1,0 +1,4 @@
+{
+  "task": "formatPrice(cents) in src/format.js always prints dollars. Give it an optional second parameter currency (\"USD\" by default): \"USD\" formats 1250 as \"$12.50\", \"EUR\" as \"€12.50\". Then make euPriceTag in src/eu.js use EUR.",
+  "check": "node --test"
+}

@@ -24,6 +24,8 @@
     "eval"
   ],
   "exclude": [
-    "src/ui/webview"
+    "src/ui/webview",
+    "eval/tasks",
+    "eval/results"
   ]
 }

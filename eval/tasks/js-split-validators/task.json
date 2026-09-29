@@ -1,0 +1,4 @@
+{
+  "task": "Move validateEmail and validatePhone out of src/users.js into a new file src/validators.js that exports both, and make src/users.js and src/admin.js use them from there.",
+  "check": "! grep -q \"function validateEmail\" src/users.js && node --test"
+}

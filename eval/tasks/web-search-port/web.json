@@ -1,0 +1,32 @@
+{
+  "search": [
+    {
+      "match": "zephyr",
+      "results": [
+        {
+          "title": "Configuration - Zephyr Broker documentation",
+          "url": "https://zephyr-broker.example.org/docs/configuration",
+          "snippet": "listener.port: TCP port the broker listens on for clients. Default: 7443. listener.host ..."
+        },
+        {
+          "title": "Zephyr Broker - a small message broker",
+          "url": "https://zephyr-broker.example.org/",
+          "snippet": "Zephyr is a lightweight message broker with persistent queues."
+        }
+      ]
+    },
+    {
+      "results": []
+    }
+  ],
+  "pages": {
+    "https://zephyr-broker.example.org/docs/configuration": {
+      "title": "Configuration - Zephyr Broker documentation",
+      "text": "# Configuration\n\nZephyr reads `zephyr.toml` from its working directory.\n\n| key | default | meaning |\n|---|---|---|\n| listener.host | 0.0.0.0 | address to bind |\n| listener.port | 7443 | TCP port clients connect to |\n| admin.port | 7444 | HTTP admin API |\n| storage.path | ./data | queue storage |\n"
+    },
+    "https://zephyr-broker.example.org/": {
+      "title": "Zephyr Broker",
+      "text": "Zephyr is a lightweight message broker. See the configuration page for ports and storage."
+    }
+  }
+}

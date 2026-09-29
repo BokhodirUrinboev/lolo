@@ -1,0 +1,4 @@
+{
+  "task": "OrderService.Total(order) in Services/OrderService.cs throws when order.Lines is null. Treat a null Lines list as empty, so the total is 0.",
+  "check": "dotnet run --project . -v q"
+}

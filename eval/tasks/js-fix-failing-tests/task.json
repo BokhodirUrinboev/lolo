@@ -1,0 +1,4 @@
+{
+  "task": "`npm test` fails. Find out why and fix the code in src/ (don't change the tests).",
+  "check": "node --test"
+}

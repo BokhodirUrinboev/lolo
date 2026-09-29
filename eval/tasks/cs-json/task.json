@@ -1,0 +1,4 @@
+{
+  "task": "Add a method ToJson() to Person (Person.cs) that returns the person as JSON with camelCase property names, using System.Text.Json. Example: {\"name\":\"Ann\",\"age\":30}.",
+  "check": "dotnet run --project . -v q"
+}

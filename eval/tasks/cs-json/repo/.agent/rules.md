@@ -1,0 +1,2 @@
+- C#: keep the namespaces.
+- verify: dotnet build -v q -nologo

@@ -1,0 +1,1 @@
+- verify: python3 -m unittest -q

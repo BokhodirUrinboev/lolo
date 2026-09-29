@@ -1,0 +1,4 @@
+{
+  "task": "Reports.TopCustomers(customers, n) in Reports.cs returns the customers who spent the least. It must return the n biggest spenders, biggest first, with customers who spent the same amount in name order.",
+  "check": "dotnet run --project . -v q"
+}

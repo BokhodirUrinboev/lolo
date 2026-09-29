@@ -1,0 +1,4 @@
+{
+  "task": "My uncommitted change to src/rate.js broke the tests. Use git diff to see what I changed, and fix the mistake but keep the rounding to cents that I added.",
+  "check": "node --test"
+}

@@ -1,0 +1,4 @@
+{
+  "task": "Make Point in geometry.py a dataclass, so that two points with the same x and y are equal and a point prints as Point(x=1, y=2). distance_to must keep working.",
+  "check": "python3 -m unittest -q"
+}

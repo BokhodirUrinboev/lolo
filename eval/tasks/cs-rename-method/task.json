@@ -1,0 +1,4 @@
+{
+  "task": "Rename the method CalcTax of TaxCalculator to ComputeTax everywhere: its definition and every call.",
+  "check": "! grep -rq CalcTax --include=*.cs . && dotnet run --project . -v q"
+}

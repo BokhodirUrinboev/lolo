@@ -1,0 +1,4 @@
+{
+  "task": "python3 -m unittest fails. Find out why and fix inventory.py (don't change the tests).",
+  "check": "python3 -m unittest -q"
+}

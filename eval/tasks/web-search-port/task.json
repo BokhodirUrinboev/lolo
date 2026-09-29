@@ -1,0 +1,6 @@
+{
+  "task": "@web Look up the default port of the Zephyr message broker and set DEFAULT_PORT in src/config.js to it.",
+  "check": "node --test",
+  "web": "web.json",
+  "approve": true
+}

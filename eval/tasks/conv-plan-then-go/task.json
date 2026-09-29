@@ -1,0 +1,10 @@
+{
+  "before": [
+    {
+      "text": "Plan how to add a method peek() to the Queue class in src/queue.js that returns the next item without removing it (undefined when empty), and a size getter.",
+      "mode": "plan"
+    }
+  ],
+  "task": "ok, do it",
+  "check": "node --test"
+}

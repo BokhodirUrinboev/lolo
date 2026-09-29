@@ -1,0 +1,4 @@
+{
+  "task": "Greeter can't be tested because it depends on SystemClock. Add an interface IClock (in IClock.cs) with a `DateTime Now { get; }` property, make SystemClock implement it, and make Greeter's constructor take an IClock instead of a SystemClock.",
+  "check": "dotnet run --project . -v q"
+}
