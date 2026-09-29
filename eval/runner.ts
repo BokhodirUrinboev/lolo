@@ -80,7 +80,7 @@ async function run(argv: string[]) {
     },
   });
   const ids = readdirSync(values.tasks!)
-    .filter((d) => existsSync(path.join(values.tasks!, d, "task.json")) && d.includes(values.filter!))
+    .filter((d) => existsSync(path.join(values.tasks!, d, "task.json")) && matchesFilter(d, values.filter!))
     .sort();
   if (!ids.length) throw new Error(`no tasks in ${values.tasks} matching "${values.filter}"`);
 
@@ -132,6 +132,12 @@ async function run(argv: string[]) {
   writeFileSync(path.join(outDir, "results.json"), JSON.stringify({ model: values.model, toolMode: provider.profile.toolMode, summary, results }, null, 2));
   const previous = previousSummary(values.out!, stamp);
   console.log(`\n${table(summary, previous)}\n\nresults: ${outDir}`);
+}
+
+/** `--filter a,b`: task ids containing any of the comma-separated parts (all tasks when empty). */
+function matchesFilter(id: string, filter: string): boolean {
+  const parts = filter.split(",").map((f) => f.trim()).filter(Boolean);
+  return !parts.length || parts.some((f) => id.includes(f));
 }
 
 function readSpec(dir: string): TaskSpec {
@@ -290,7 +296,7 @@ async function validate(argv: string[]) {
     args: argv,
     options: { tasks: { type: "string", default: path.join(process.cwd(), "eval", "tasks") }, filter: { type: "string", default: "" } },
   });
-  const ids = readdirSync(values.tasks!).filter((d) => existsSync(path.join(values.tasks!, d, "task.json")) && d.includes(values.filter!)).sort();
+  const ids = readdirSync(values.tasks!).filter((d) => existsSync(path.join(values.tasks!, d, "task.json")) && matchesFilter(d, values.filter!)).sort();
   let problems = 0;
   for (const id of ids) {
     const dir = path.join(values.tasks!, id);
