@@ -169,7 +169,7 @@ export class McpHub {
   private async connect(s: Server): Promise<void> {
     const c = s.config;
     try {
-      const client = new Client({ name: "agent-lolo", version: "0.4.0" });
+      const client = new Client({ name: "agent-lolo", version: "0.5.0" });
       const transport = c.url
         ? new StreamableHTTPClientTransport(new URL(c.url), { requestInit: { headers: c.headers } })
         : new StdioClientTransport({

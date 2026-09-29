@@ -54,6 +54,7 @@ interface TaskResult {
   steps: number;
   modelCalls: number;
   invalidCalls: number;
+  refusedCalls: number;
   editCalls: number;
   editsApplied: number;
   ms: number;
@@ -118,7 +119,7 @@ async function run(argv: string[]) {
       const check = runCommandSync(spec.check, { cwd: ws, timeoutMs: 5 * 60_000 });
       const pass = check.status === 0;
       results.push({
-        id, run: r, pass, status: res.status, steps: s.steps, modelCalls: s.modelCalls, invalidCalls: s.invalidCalls,
+        id, run: r, pass, status: res.status, steps: s.steps, modelCalls: s.modelCalls, invalidCalls: s.invalidCalls, refusedCalls: s.refusedCalls ?? 0,
         editCalls: s.editCalls, editsApplied: s.editsApplied, ms: s.ms, checkOutput: check.output.slice(-2000),
       });
       const log = path.join(outDir, "trajectories", `${id}-${r}${pass ? "-pass" : "-fail"}.jsonl`);
@@ -316,6 +317,8 @@ export function aggregate(rs: TaskResult[]) {
   return {
     tasks: rs.length,
     toolCallValidity: pct(sum((r) => r.modelCalls - r.invalidCalls), sum((r) => r.modelCalls)),
+    /** Share of calls refused by policy (read before edit, protected tests); not invalid. */
+    refused: pct(sum((r) => r.refusedCalls ?? 0), sum((r) => r.modelCalls)),
     editApply: pct(sum((r) => r.editsApplied), sum((r) => r.editCalls)),
     taskPass: pct(rs.filter((r) => r.pass).length, rs.length),
     avgSteps: Math.round((10 * sum((r) => r.steps)) / Math.max(1, rs.length)) / 10,
@@ -334,6 +337,7 @@ function previousSummary(outRoot: string, current: string): Summary | undefined 
 function table(s: Summary, prev?: Summary): string {
   const rows: [string, keyof Summary, string, string][] = [
     ["tool-call validity", "toolCallValidity", "%", "≥ 98%"],
+    ["refused by policy", "refused", "%", ""],
     ["edit apply", "editApply", "%", "≥ 95%"],
     ["task pass", "taskPass", "%", "≥ 60%"],
     ["avg steps", "avgSteps", "", ""],
@@ -342,7 +346,7 @@ function table(s: Summary, prev?: Summary): string {
   const lines = [`metric               value     Δ prev    target`, `-------------------  --------  --------  ------`];
   for (const [label, key, unit, target] of rows) {
     const v = s[key];
-    const d = prev ? Math.round((v - prev[key]) * 10) / 10 : undefined;
+    const d = prev && typeof prev[key] === "number" ? Math.round((v - prev[key]) * 10) / 10 : undefined;
     lines.push(`${label.padEnd(19)}  ${`${v}${unit}`.padEnd(8)}  ${(d === undefined ? "" : `${d > 0 ? "+" : ""}${d}`).padEnd(8)}  ${target}`);
   }
   return `${s.tasks} runs\n${lines.join("\n")}`;

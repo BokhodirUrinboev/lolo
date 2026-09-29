@@ -85,7 +85,7 @@ export async function fetchPage(url: string, root?: string, signal?: AbortSignal
     const res = await fetch(current, {
       redirect: "manual",
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; AgentLolo/0.4; +https://github.com/Nodirbek-Abdulaxadov/lolo)", Accept: "text/html,text/plain,text/markdown,application/json;q=0.9,*/*;q=0.5" },
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; AgentLolo/0.5; +https://github.com/Nodirbek-Abdulaxadov/lolo)", Accept: "text/html,text/plain,text/markdown,application/json;q=0.9,*/*;q=0.5" },
     });
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
       if (hop >= MAX_REDIRECTS) throw new Error("too many redirects");

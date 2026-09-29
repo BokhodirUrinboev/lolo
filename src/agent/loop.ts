@@ -77,6 +77,8 @@ export interface RunStats {
   modelCalls: number;
   toolCalls: number;
   invalidCalls: number;
+  /** Well-formed calls refused by policy (read before edit, protected tests); not counted as invalid. */
+  refusedCalls: number;
   editCalls: number;
   editsApplied: number;
   /** Writes identical to the current file; excluded from editCalls. */
@@ -170,7 +172,7 @@ export class Agent {
     const { host, provider } = this.deps;
     const profile = provider.profile;
     const started = Date.now();
-    const stats: RunStats = { steps: 0, modelCalls: 0, toolCalls: 0, invalidCalls: 0, editCalls: 0, editsApplied: 0, noopEdits: 0, promptTokens: 0, outputTokens: 0, ms: 0 };
+    const stats: RunStats = { steps: 0, modelCalls: 0, toolCalls: 0, invalidCalls: 0, refusedCalls: 0, editCalls: 0, editsApplied: 0, noopEdits: 0, promptTokens: 0, outputTokens: 0, ms: 0 };
     const changed = new Set<string>();
     const emit = (e: AgentEvent) => this.deps.onEvent?.(e);
     const runId = new Date().toISOString().replace(/[:.]/g, "-");
@@ -473,7 +475,8 @@ export class Agent {
       }
       const checked = await this.registry.check(action, offered, ctx);
       if (!checked.ok) {
-        stats.invalidCalls++;
+        if (checked.policy) stats.refusedCalls++;
+        else stats.invalidCalls++;
         failures++;
         emit({ type: "invalid", error: checked.error });
         log?.write("invalid", { action, error: checked.error });

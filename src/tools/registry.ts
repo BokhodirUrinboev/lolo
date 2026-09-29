@@ -41,7 +41,8 @@ export interface Action {
   args: Record<string, unknown>;
 }
 
-export type Checked = { ok: true; tool: ToolDef; args: any } | { ok: false; error: string };
+/** `policy`: a well-formed call the orchestration refuses (read before edit, protected tests), not a model format error. */
+export type Checked = { ok: true; tool: ToolDef; args: any } | { ok: false; error: string; policy?: boolean };
 
 export class ToolRegistry {
   /** Built-in tools plus this run's external (MCP) tools. */
@@ -153,12 +154,12 @@ export class ToolRegistry {
     }
     // Read before edit (as in Claude Code): models guess the lines of files they haven't seen.
     if (ctx.seen && EDITS_EXISTING.has(tool.name) && typeof args.path === "string" && !ctx.seen.has(args.path) && (await ctx.host.stat(args.path)) === "file") {
-      return { ok: false, error: `You haven't read ${args.path} in this task. Read it first (read_file), then change it using its exact lines.` };
+      return { ok: false, policy: true, error: `You haven't read ${args.path} in this task. Read it first (read_file), then change it using its exact lines.` };
     }
     // "The tests fail, fix it": existing tests stay as they are (see agent/testGuard.ts).
     const target = typeof args.path === "string" ? args.path : typeof args.from === "string" ? args.from : undefined;
     if (ctx.protectTests && tool.kind === "write" && tool.name !== "create_file" && target && isTestFile(target) && (await ctx.host.stat(target)) === "file") {
-      return { ok: false, error: `${target} ${TESTS_PROTECTED}` };
+      return { ok: false, policy: true, error: `${target} ${TESTS_PROTECTED}` };
     }
     const semantic = await tool.check?.(args, ctx);
     if (semantic) return { ok: false, error: semantic };
