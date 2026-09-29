@@ -34,6 +34,8 @@ export interface ToolContext {
   largeRepo?: boolean;
   /** Text of the todo being worked on. */
   todo?: string;
+  /** The user's message for this run. */
+  message?: string;
   /** The model's reasoning for the current call (e.g. which function it means). */
   thought?: string;
   /** The user's message is about failing tests (or forbids changing them): existing test files are read-only. */

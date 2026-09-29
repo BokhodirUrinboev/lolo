@@ -302,6 +302,7 @@ export class Agent {
       // 4. Execute todos.
       const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: this.deps.commandAllowlist, signal, readOnly: execMode === "ask", processes, semantic,
         web: this.deps.web,
+        message: task,
         protectTests: protectTests(task),
         // @-mentioned files are in the task message; everything else must be read before it is edited.
         seen: new Set(mentions.files),

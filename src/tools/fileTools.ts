@@ -1,10 +1,11 @@
 import { listFiles } from "../context/repoMap";
 import { fileSymbols, languageFor } from "../context/treeSitter";
+import { restoreCopiedEscapes } from "../edit/escapes";
 import { applyLineRange, editToolFor, EditTool, isLazyPlaceholder, isStub, mergeLazyRewrite } from "../edit/formats";
 import { fuzzyApply, overlapCandidates, reindent } from "../edit/fuzzyApply";
 import { checkEditSyntax, findImbalance, syntaxRepairs } from "../edit/syntaxGuard";
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
-import { moduleSystemProblem } from "./moduleSystem";
+import { moduleSystemMismatch, moduleSystemProblem, toCommonJs, undefinedExports } from "./moduleSystem";
 import { IGNORED_DIRS } from "./paths";
 import { symbolSummary } from "./output";
 import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
@@ -227,8 +228,24 @@ function fixEscapes(a: { content: string }) {
   escaped.add(a);
 }
 
-const escapeNote = (a: object) => (escaped.has(a) ? ESCAPE_NOTE : "");
+const converted = new WeakSet<object>();
+const escapeNote = (a: object) => (escaped.has(a) ? ESCAPE_NOTE : "") + (converted.has(a) ? CONVERTED_NOTE : "");
 const ESCAPE_NOTE = " (your line breaks were escaped twice as \\\\n; they were turned into real line breaks)";
+const CONVERTED_NOTE = " (this project uses CommonJS, so export/import were turned into module.exports/require; use require to load it)";
+
+/**
+ * The module-system check for a whole file (create_file, rewrite_file): export/import in a CommonJS
+ * project is converted by code when the file uses only plain forms, instead of refused.
+ */
+async function wholeFileModules(a: { path: string; content: string }, before: string, ctx: ToolContext): Promise<string | undefined> {
+  const mismatch = await moduleSystemMismatch(a.path, a.content, before, ctx);
+  if (!mismatch) return undefined;
+  const cjs = mismatch.wants === "commonjs" ? toCommonJs(a.content) : undefined;
+  if (!cjs) return mismatch.advice;
+  a.content = cjs;
+  converted.add(a);
+  return undefined;
+}
 
 /**
  * A `// existing implementation` / `// ... rest of the code` line that `before` doesn't have:
@@ -302,8 +319,22 @@ async function redefinition(path: string, original: string, search: string, repl
 const BRACE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|cs|java|kt|go|rs|c|h|cpp|hpp|cc|swift|php|dart|scala)$/i;
 
 /** `fragment`: the text the model wrote for this edit (to spot a reply cut off by an unescaped quote). */
+/** Lines of `before` and of the files the model read in this run: the code it may be copying. */
+async function knownLines(ctx: ToolContext, before?: string): Promise<string[]> {
+  const texts = before !== undefined ? [before] : [];
+  for (const f of [...(ctx.seen ?? [])].slice(0, 30)) texts.push(await ctx.host.readFile(f).catch(() => ""));
+  return texts.flatMap((t) => toLf(t).split("\n"));
+}
+
+const ESCAPES_RESTORED = " (regex escapes such as \\s that came out as line breaks were restored from the code you read; in JSON write them as \\\\s)";
+
 async function write(ctx: ToolContext, path: string, content: string, isNew: boolean, reason: string, note = "", fragment = content): Promise<ToolResult> {
   const before = isNew ? undefined : await ctx.host.readFile(path);
+  const restored = restoreCopiedEscapes(content, await knownLines(ctx, before));
+  if (restored.fixed) {
+    content = restored.text;
+    note += ESCAPES_RESTORED;
+  }
   if (before !== undefined) content = matchFileEnding(before, content);
   if (content === before) {
     return {
@@ -313,6 +344,11 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
   }
   const pkg = before !== undefined ? handAddedPackage(path, before, content) : undefined;
   if (pkg) return fail(pkg, `${reason}: rejected (package added by hand)`);
+  const missing = undefinedExports(path, content).filter((n) => !undefinedExports(path, before ?? "").includes(n));
+  if (missing.length) {
+    const what = missing.map((n) => `\`${n}\``).join(", ");
+    return fail(`${path} would export ${what} without defining ${missing.length > 1 ? "them" : "it"}. Write the complete file: the code of ${what} (copied from where it was) and the export. The file was NOT changed.`, `${reason}: rejected (exports an undefined name)`);
+  }
   const broken = await checkEditSyntax(path, before, content, fragment);
   if (broken) {
     let repaired: { text: string; note: string } | undefined;
@@ -355,6 +391,7 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
   },
   async run(a, ctx) {
     const original = await ctx.host.readFile(a.path);
+    a.search = restoreCopiedEscapes(a.search, toLf(original).split("\n")).text;
     let r = fuzzyApply(original, a.search, a.replace, { all: a.all });
     let where = "";
     // `search` with `\n` typed as text: when its unescaped form is in the file, the model escaped twice.
@@ -441,7 +478,7 @@ export const rewriteFile: ToolDef<{ path: string; content: string }> = {
     const refused = (await mustBeFile(a.path, ctx)) ?? (await mustUse("rewrite_file", a.path, ctx));
     if (refused) return refused;
     const before = await ctx.host.readFile(a.path);
-    return stubIn(a.content, before, a.path, ctx.todo) ?? moduleSystemProblem(a.path, a.content, before, ctx);
+    return stubIn(a.content, before, a.path, ctx.todo) ?? wholeFileModules(a, before, ctx);
   },
   async run(a, ctx) {
     if ((await ctx.host.stat(a.path)) === null) return createFile.run(a, ctx);
@@ -499,7 +536,7 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
     if (!a.content.trim() && !/(^|\/)(__init__\.py|\.gitkeep|\.keep|py\.typed)$/.test(a.path)) {
       return `content is empty. Create ${a.path} with its complete content in this call.`;
     }
-    return placeholderIn(a.content, "", a.path, ctx.todo) ?? moduleSystemProblem(a.path, a.content, "", ctx);
+    return placeholderIn(a.content, "", a.path, ctx.todo) ?? wholeFileModules(a, "", ctx);
   },
   run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`, escapeNote(a)),
 };

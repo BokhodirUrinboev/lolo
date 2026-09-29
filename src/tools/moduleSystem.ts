@@ -1,10 +1,64 @@
 import { listFiles } from "../context/repoMap";
 import type { ToolContext } from "./types";
 
-const ESM = /^\s*(?:export\s+(?:default\b|const\b|let\b|var\b|function\b|async\b|class\b|\{)|import\s+(?:[\w*{][^'"]*\s+from\s+)?['"])/m;
+const ESM = /^\s*(?:export\s+(?:\*|default\b|const\b|let\b|var\b|function\b|async\b|class\b|\{)|import\s+(?:[\w*{][^'"]*\s+from\s+)?['"])/m;
 const CJS = /\brequire\s*\(\s*['"]|\bmodule\.exports\b|^\s*exports\.\w+\s*=/m;
 // The user asked for the other module system: a conversion is the task, not a mistake.
 const CONVERTS = /\b(?:ESM|ES ?modules?|ECMAScript modules?|CommonJS|CJS)\b|import\/export|"type":\s*"module"/i;
+
+const IDENT = /^[A-Za-z_$][\w$]*$/;
+const LITERALS = new Set(["true", "false", "null", "undefined", "this", "NaN", "Infinity", "require", "module", "exports", "console", "process"]);
+
+/**
+ * Names a JavaScript file exports (`module.exports = { a, b }`, `export { a }`) without defining,
+ * importing or requiring them: after a refusal, models wrote only `module.exports = { computeTax };`.
+ */
+export function undefinedExports(path: string, text: string): string[] {
+  if (!/\.(c|m)?jsx?$/.test(path)) return [];
+  const lists = [...text.matchAll(/module\.exports\s*=\s*\{([^}]*)\}/g), ...text.matchAll(/^\s*export\s*\{([^}]*)\}\s*;?\s*$/gm)].map((m) => m[1]);
+  const names = lists.flatMap((l) =>
+    l.split(",").map((item) => {
+      const [key, value] = item.split(/\s+as\s+|:/).map((s) => s.trim());
+      return /\s+as\s+/.test(item) ? key : (value ?? key);
+    }),
+  );
+  const escape = (n: string) => n.replace(/\$/g, "\\$");
+  return [...new Set(names.filter((n) => IDENT.test(n) && !LITERALS.has(n)))].filter((n) => {
+    const e = escape(n);
+    return !new RegExp(
+      String.raw`\b(?:function\*?|class|const|let|var)\s+${e}\b|\b(?:const|let|var)\s*[{[][^}\]]*\b${e}\b[^}\]]*[}\]]\s*=|^\s*${e}\s*=|\bimport\b[^;]*\b${e}\b[^;]*\bfrom\b`,
+      "m",
+    ).test(text);
+  });
+}
+
+/**
+ * A whole file written with export/import turned into CommonJS by code, for the plain forms models
+ * write (`export function f`, `export const x`, `export { a }`, `import { a } from "./m"`); undefined
+ * for anything else (default exports, re-exports, `module.exports` already there). Planners put
+ * "export function ..." into the todo itself, and the model followed it through every refusal.
+ */
+export function toCommonJs(text: string): string | undefined {
+  if (/\bmodule\.exports\b|^\s*export\s+default\b|^\s*export\s*\*|^\s*export\s*\{[^}]*\}\s*from\b/m.test(text)) return undefined;
+  const names: string[] = [];
+  let out = text.replace(/^(\s*)export\s+((?:async\s+)?function\s*\*?\s*|class\s+|(?:const|let|var)\s+)([A-Za-z_$][\w$]*)/gm, (_m, indent: string, kind: string, name: string) => {
+    names.push(name);
+    return `${indent}${kind}${name}`;
+  });
+  out = out.replace(/^\s*export\s*\{([^}]*)\}\s*;?[ \t]*$/gm, (_m, list: string) => {
+    for (const item of list.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const [local, as] = item.split(/\s+as\s+/);
+      names.push(as ? `${as}: ${local}` : local);
+    }
+    return "";
+  });
+  const bindings = (list: string) => list.split(",").map((s) => s.trim()).filter(Boolean).map((s) => s.replace(/\s+as\s+/, ": ")).join(", ");
+  out = out
+    .replace(/^(\s*)import\s*\{([^}]*)\}\s*from\s*(['"][^'"]+['"])\s*;?/gm, (_m, indent: string, list: string, from: string) => `${indent}const { ${bindings(list)} } = require(${from});`)
+    .replace(/^(\s*)import\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s*(['"][^'"]+['"])\s*;?/gm, (_m, indent: string, name: string, from: string) => `${indent}const ${name} = require(${from});`);
+  if (/^\s*(?:export|import)\b/m.test(out) || out === text) return undefined;
+  return names.length ? `${out.replace(/\s*$/, "")}\n\nmodule.exports = { ${names.join(", ")} };\n` : out;
+}
 
 /** The nearest package.json above `path` (workspace-relative), or undefined. */
 async function nearestPackage(path: string, ctx: ToolContext): Promise<string | undefined> {
@@ -23,6 +77,16 @@ async function nearestPackage(path: string, ctx: ToolContext): Promise<string | 
  * `before` is the file's current content ("" for a new file): its own style stays allowed.
  */
 export async function moduleSystemProblem(path: string, content: string, before: string, ctx: ToolContext): Promise<string | undefined> {
+  return (await moduleSystemMismatch(path, content, before, ctx))?.advice;
+}
+
+/** As moduleSystemProblem, with the module system the file must use. */
+export async function moduleSystemMismatch(
+  path: string,
+  content: string,
+  before: string,
+  ctx: ToolContext,
+): Promise<{ wants: "commonjs" | "module"; advice: string } | undefined> {
   const ext = path.match(/\.(c|m)?js$/)?.[1] ?? (path.endsWith(".js") ? "" : undefined);
   if (ext === undefined || CONVERTS.test(ctx.todo ?? "")) return undefined;
   const esm = ESM.test(content) && !ESM.test(before);
@@ -38,7 +102,8 @@ export async function moduleSystemProblem(path: string, content: string, before:
   }
   const projectEsm = ext === "m" || (ext === "" && type === "module");
   if (projectEsm && cjs) {
-    return `${ext === "m" ? `${path} is an ES module (.mjs)` : `${pkg} has "type": "module"`}, so require and module.exports are not defined here. Use \`export function name\` / \`export { name }\` and \`import { name } from "./file.js"\`.`;
+    const where = ext === "m" ? `${path} is an ES module (.mjs)` : `${pkg} has "type": "module"`;
+    return { wants: "module", advice: `${where}, so require and module.exports are not defined here. Use \`export function name\` / \`export { name }\` and \`import { name } from "./file.js"\`.` };
   }
   if (!esm || projectEsm) return undefined;
   if (ext === "" && type !== "commonjs") {
@@ -53,5 +118,5 @@ export async function moduleSystemProblem(path: string, content: string, before:
     if (!cjsFiles) return undefined;
   }
   const why = ext === "c" ? `${path} is a CommonJS file (.cjs)` : `This project uses CommonJS (require and module.exports; ${pkg ? `${pkg} has no "type": "module"` : "no package.json"})`;
-  return `${why}, so export/import would fail in Node. Export with \`module.exports = { name }\` and load it with \`const { name } = require("./file")\`, like the other files do.`;
+  return { wants: "commonjs", advice: `${why}, so export/import would fail in Node. Export with \`module.exports = { name }\` and load it with \`const { name } = require("./file")\`, like the other files do.` };
 }

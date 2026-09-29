@@ -1,16 +1,18 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { laterTodoFor } from "../src/agent/loop";
 import { dropLookOnlyTodos, dropUnaskedTestTodos, mergeTodos, namedFiles } from "../src/agent/planner";
 import { isTestFile, protectTests } from "../src/agent/testGuard";
+import { restoreCopiedEscapes } from "../src/edit/escapes";
 import { EditState } from "../src/edit/formats";
 import { fuzzyApply } from "../src/edit/fuzzyApply";
 import { NodeHost } from "../src/host/nodeHost";
 import { resolveProfile } from "../src/providers/modelProfiles";
 import { createFile, doubleEscaped, editFile, editLines, rewriteFile } from "../src/tools/fileTools";
 import { addUsing, missingUsings, workspacePath } from "../src/tools/missingImports";
+import { toCommonJs, undefinedExports } from "../src/tools/moduleSystem";
 import { relativizePaths } from "../src/tools/output";
 import { errorContext } from "../src/tools/testReport";
 import { ToolRegistry } from "../src/tools/registry";
@@ -240,17 +242,36 @@ describe("module system", () => {
     "src/util.js": "module.exports = { round: (x) => Math.round(x * 100) / 100 };\n",
   };
 
-  it("refuses export/import in a CommonJS project", async () => {
-    const { ctx } = workspace(cjs);
-    expect(await createFile.check!({ path: "src/tax.js", content: "export function computeTax(amount) {\n  return amount * 0.12;\n}\n" }, ctx)).toMatch(/CommonJS.*module\.exports = \{ name \}/);
-    expect(await createFile.check!({ path: "src/tax.js", content: "function computeTax(amount) {\n  return amount * 0.12;\n}\n\nmodule.exports = { computeTax };\n" }, ctx)).toBeUndefined();
+  it("turns export/import in a CommonJS project into module.exports/require, or refuses it", async () => {
+    const { ctx, read } = workspace(cjs);
+    const tax = { path: "src/tax.js", content: "import { round } from \"./util.js\";\n\nexport function computeTax(amount) {\n  return round(amount * 0.12);\n}\n" };
+    expect(await createFile.check!(tax, ctx)).toBeUndefined();
+    const r = await createFile.run(tax, ctx);
+    expect(r.output).toContain("CommonJS");
+    expect(read("src/tax.js")).toBe("const { round } = require(\"./util.js\");\n\nfunction computeTax(amount) {\n  return round(amount * 0.12);\n}\n\nmodule.exports = { computeTax };\n");
+    const util = { path: "src/util.js", content: "export const round = (x) => Math.round(x * 100) / 100;\n" };
+    expect(await rewriteFile.check!(util, ctx)).toBeUndefined();
+    expect(util.content).toContain("module.exports = { round };");
+    // What can't be converted by code is refused, and so are edits of a part of a file.
+    expect(await createFile.check!({ path: "src/t.js", content: "export default function () {}\n" }, ctx)).toMatch(/CommonJS.*module\.exports = \{ name \}/);
+    expect(await createFile.check!({ path: "src/t.cjs", content: "export * from \"./x\";\n" }, ctx)).toMatch(/\.cjs/);
     expect(await editFile.check!({ path: "src/order.js", search: "module.exports = { orderTotal };", replace: "export { orderTotal };" }, ctx)).toMatch(/CommonJS/);
-    expect(await rewriteFile.check!({ path: "src/util.js", content: "export const round = (x) => Math.round(x * 100) / 100;\n" }, ctx)).toMatch(/CommonJS/);
     const lineCtx: ToolContext = { ...ctx, profile: { ...ctx.profile, editFormat: "line-range" } };
     expect(await editLines.check!({ path: "src/order.js", start_line: 1, end_line: 1, content: "import { round } from './util';" }, lineCtx)).toMatch(/CommonJS/);
-    // Converting is fine when the todo asks for it.
-    expect(await createFile.check!({ path: "src/tax.js", content: "export const t = 1;\n" }, { ...ctx, todo: "Convert the project to ES modules" })).toBeUndefined();
-    expect(await createFile.check!({ path: "src/tax.cjs", content: "export const t = 1;\n" }, ctx)).toMatch(/\.cjs/);
+    // Converting the project is fine when the todo asks for it.
+    const esm = { path: "src/t.js", content: "export const t = 1;\n" };
+    expect(await createFile.check!(esm, { ...ctx, todo: "Convert the project to ES modules" })).toBeUndefined();
+    expect(esm.content).toBe("export const t = 1;\n");
+  });
+
+  it("converts only the plain forms", () => {
+    expect(toCommonJs("export const a = 1;\nexport class B {}\nexport async function c() {}\nconst d = 2;\nexport { d as e };\n")).toBe(
+      "const a = 1;\nclass B {}\nasync function c() {}\nconst d = 2;\n\nmodule.exports = { a, B, c, e: d };\n",
+    );
+    expect(toCommonJs("import * as fs from \"node:fs\";\nimport path from \"node:path\";\nfs.x(path);\n")).toBe("const fs = require(\"node:fs\");\nconst path = require(\"node:path\");\nfs.x(path);\n");
+    expect(toCommonJs("export default 1;\n")).toBeUndefined();
+    expect(toCommonJs("export { a } from \"./a\";\n")).toBeUndefined();
+    expect(toCommonJs("const a = 1;\nmodule.exports = { a };\n")).toBeUndefined();
   });
 
   it("refuses require in an ES module project, and leaves bundled code alone", async () => {
@@ -292,6 +313,82 @@ describe("test guard", () => {
     expect(!edit.ok && edit.error).toContain("is a test");
     expect((await reg.check({ thought: "", tool: "edit", args: { path: "src/a.js", search: "1", replace: "2" } }, reg.all, ctx)).ok).toBe(true);
     expect((await reg.check({ thought: "", tool: "create_file", args: { path: "test/b.test.js", content: "// new\n" } }, reg.all, ctx)).ok).toBe(true);
+  });
+});
+
+describe("regex escapes a JSON-constrained model couldn't write", () => {
+  const users = String.raw`function validateEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+module.exports = { validateEmail };
+`;
+
+  it("restores copied lines whose \\s came out as a line break or `\\ `", async () => {
+    const { ctx, read } = workspace({ "src/users.js": users });
+    ctx.seen = new Set(["src/users.js"]);
+    const broken = "function validateEmail(email) {\n  return /^[^\n@]+@[^\n@]+\\.[^\n@]+$/.test(email);\n}\n\nmodule.exports = { validateEmail };\n";
+    const r = await createFile.run({ path: "src/validators.js", content: broken }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("restored");
+    expect(read("src/validators.js")).toBe(users);
+    const spaced = "function validateEmail(email) {\n  return /^[^\\ @]+@[^\\ @]+\\.[^\\ @]+$/.test(email);\n}\n\nmodule.exports = { validateEmail };\n";
+    expect((await rewriteFile.run({ path: "src/validators.js", content: spaced.replace("email)", "e)") }, ctx)).ok).toBe(true);
+    expect(read("src/validators.js")).toContain(String.raw`/^[^\s@]+@[^\s@]+\.[^\s@]+$/`);
+    // A stray line break before an escape the model did write, or in front of `\+`.
+    expect(restoreCopiedEscapes("    return /^[^\n\\s@]+@[^\n\\s@]+\\.[^\n\\s@]+$/.test(email);", users.split("\n")).text).toBe(String.raw`    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);`);
+    const phone = String.raw`  return /^\+?[0-9 ]{7,15}$/.test(phone);`;
+    expect(restoreCopiedEscapes("    return /^\n\\+?[0-9 ]{7,15}$/.test(phone);\n  }", [phone])).toEqual({ text: String.raw`    return /^\+?[0-9 ]{7,15}$/.test(phone);` + "\n  }", fixed: 1 });
+    // Code that is really on several lines stays so.
+    expect(restoreCopiedEscapes("foo(\n  bar);", ["foo(bar);"]).fixed).toBe(0);
+    // `search` too, against the file being edited.
+    const edit = await editFile.run({ path: "src/users.js", search: "  return /^[^\n@]+@[^\n@]+\\.[^\n@]+$/.test(email);", replace: "  return isEmail(email);" }, ctx);
+    expect(edit.ok).toBe(true);
+    expect(read("src/users.js")).toContain("return isEmail(email);");
+  });
+});
+
+describe("exports of undefined names", () => {
+  it("finds exported names the file doesn't define", () => {
+    expect(undefinedExports("src/tax.js", "module.exports = { computeTax };\n")).toEqual(["computeTax"]);
+    expect(undefinedExports("src/tax.js", "function computeTax(a) {\n  return a;\n}\nmodule.exports = { computeTax };\n")).toEqual([]);
+    expect(undefinedExports("src/a.js", "const { round } = require(\"./util\");\nconst f = (a, b) => a + b;\nmodule.exports = { round, f, g: (x, y) => x, h: helper };\n")).toEqual(["helper"]);
+    expect(undefinedExports("src/a.mjs", "import { a } from \"./a.js\";\nexport { a, b as c };\n")).toEqual(["b"]);
+    expect(undefinedExports("src/a.py", "module.exports = { x }")).toEqual([]);
+  });
+
+  it("finds nothing in the evaluation's repos and reference solutions", () => {
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? (e.name === "node_modules" ? [] : walk(path.join(dir, e.name))) : [path.join(dir, e.name)]));
+    const files = walk(path.join(__dirname, "../eval/tasks")).filter((f) => /\.(c|m)?js$/.test(f));
+    expect(files.length).toBeGreaterThan(10);
+    for (const f of files) expect(undefinedExports(f, readFileSync(f, "utf8")), f).toEqual([]);
+  });
+
+  it("refuses the write and keeps the file", async () => {
+    const { ctx, root } = workspace({ "src/order.js": "module.exports = {};\n" });
+    const r = await createFile.run({ path: "src/tax.js", content: "module.exports = { computeTax };\n" }, ctx);
+    expect(!r.ok && r.output).toContain("without defining it");
+    expect(existsSync(path.join(root, "src/tax.js"))).toBe(false);
+  });
+});
+
+describe("read before moving code into a new file", () => {
+  it("refuses the new file until one of the files the code comes from was read", async () => {
+    const { ctx } = workspace({ "src/order.js": "const t = Math.round(n * 0.12 * 100) / 100;\n", "src/invoice.js": "const t = Math.round(a * 0.12 * 100) / 100;\n" });
+    ctx.seen = new Set();
+    ctx.message = "src/order.js and src/invoice.js both compute a 12% tax inline. Move that into a function computeTax(amount) exported from a new file src/tax.js.";
+    const reg = new ToolRegistry();
+    const create = { thought: "", tool: "create_file", args: { path: "src/tax.js", content: "function computeTax(a) {\n  return a * 0.12;\n}\nmodule.exports = { computeTax };\n" } };
+    const refused = await reg.check(create, reg.all, ctx);
+    expect(!refused.ok && refused.policy).toBe(true);
+    expect(!refused.ok && refused.error).toContain("read_file src/order.js or src/invoice.js");
+    ctx.seen.add("src/invoice.js");
+    expect((await reg.check(create, reg.all, ctx)).ok).toBe(true);
+    // Not a move: a new file needs no reading first.
+    ctx.seen = new Set();
+    ctx.message = "Add a function computeTax in a new file src/tax.js and use it in src/order.js.";
+    expect((await reg.check(create, reg.all, ctx)).ok).toBe(true);
   });
 });
 
