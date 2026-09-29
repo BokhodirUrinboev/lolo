@@ -34,6 +34,17 @@ from datasets import load_dataset
 from trl import SFTConfig, SFTTrainer
 
 
+def as_ollama_sends(messages):
+    """Ollama joins consecutive messages of one role with a blank line: train on what it sends."""
+    out = []
+    for m in messages:
+        if out and out[-1]["role"] == m["role"]:
+            out[-1] = {"role": m["role"], "content": out[-1]["content"] + "\n\n" + m["content"]}
+        else:
+            out.append({"role": m["role"], "content": m["content"]})
+    return out
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     data_file, out_dir = args[0], args[1]
@@ -72,7 +83,7 @@ def main():
     # present, TRL skips its own tokenization (which passes the tokenizer the same way).
     ds = load_dataset("json", data_files=data_file, split="train")
     ds = ds.map(
-        lambda r: {"input_ids": tokenizer(tokenizer.apply_chat_template(r["messages"], tokenize=False), add_special_tokens=False)["input_ids"][-MAX_LEN:]},
+        lambda r: {"input_ids": tokenizer(tokenizer.apply_chat_template(as_ollama_sends(r["messages"]), tokenize=False), add_special_tokens=False)["input_ids"][-MAX_LEN:]},
         remove_columns=ds.column_names,
         new_fingerprint="lolo-trajectories-tokenized",
     )
