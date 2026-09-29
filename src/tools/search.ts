@@ -31,7 +31,7 @@ export const search: ToolDef<{ query: string; path?: string; regex?: boolean }> 
     return a.path && !(await ctx.host.stat(a.path)) ? `"${a.path}" does not exist.` : undefined;
   },
   async run(a, ctx) {
-    const args = ["--line-number", "--no-heading", "--color=never", "--max-columns=200", "--max-columns-preview", "--smart-case"];
+    const args = ["--line-number", "--no-heading", "--color=never", "--path-separator=/", "--max-columns=200", "--max-columns-preview", "--smart-case"];
     if (!a.regex) args.push("--fixed-strings");
     for (const d of IGNORED_DIRS) args.push("--glob", `!${d}/`);
     args.push("--", a.query, a.path ?? ".");

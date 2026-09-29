@@ -43,6 +43,8 @@ export interface Host {
   renameEdits?(pos: SourcePos, newName: string): Promise<FileChange[] | undefined>;
   /** Path to a ripgrep binary, if the host knows one. */
   rgPath?(): string | undefined;
+  /** The shell runCommand uses, e.g. "bash (Git Bash)" or "PowerShell" (for the prompt's Environment line). */
+  readonly shell?: string;
 }
 
 /** A position in a workspace file: 1-based line, 0-based column. */

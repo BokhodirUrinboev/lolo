@@ -1,6 +1,7 @@
-import { ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import * as path from "node:path";
+import { commandEnv, killTree, listenerPid, spawnCommand } from "../host/shell";
 import { decideCommand } from "./commandPolicy";
 import { truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
@@ -26,6 +27,9 @@ interface Proc {
   /** Output offset already shown to the model. */
   shown: number;
   exitCode?: number | null;
+  /** The port it was started for (start_process `port`), when it opened. */
+  port?: number;
+  stopped?: boolean;
 }
 
 export class ProcessManager {
@@ -43,12 +47,8 @@ export class ProcessManager {
   }
 
   start(command: string, cwd = "."): Proc {
-    const child = spawn(command, {
-      cwd: path.join(this.root, cwd),
-      shell: true,
-      detached: process.platform !== "win32", // own process group, so stop() also ends what the shell started
-      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1", BROWSER: "none", CI: "1" },
-    });
+    // Own process group (POSIX) / taskkill /T (Windows), so stop() also ends what the shell started.
+    const child = spawnCommand(command, { cwd: path.join(this.root, cwd), env: commandEnv({ FORCE_COLOR: "0", NO_COLOR: "1", BROWSER: "none", CI: "1" }) });
     const p: Proc = { id: this.nextId++, command, child, output: "", shown: 0 };
     const add = (d: Buffer) => {
       p.output += d.toString();
@@ -74,32 +74,35 @@ export class ProcessManager {
     const until = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < until && !signal?.aborted) {
       if (p.exitCode !== undefined) return "exited";
-      if (port ? await portOpen(port) : READY.test(p.output)) return "ready";
+      if (port ? await portOpen(port) : READY.test(p.output)) {
+        if (port) p.port = port;
+        return "ready";
+      }
       await new Promise((r) => setTimeout(r, 300));
     }
     return "timeout";
   }
 
   async stop(p: Proc): Promise<void> {
-    if (p.exitCode !== undefined || !p.child.pid) return;
-    const exited = new Promise<void>((r) => p.child.once("exit", () => r()));
-    kill(p.child.pid, "SIGTERM");
-    const t = setTimeout(() => p.child.pid && kill(p.child.pid, "SIGKILL"), 3000);
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 4000))]);
-    clearTimeout(t);
+    if (!p.child.pid || p.stopped) return;
+    p.stopped = true;
+    if (p.exitCode === undefined) {
+      const exited = new Promise<void>((r) => p.child.once("exit", () => r()));
+      killTree(p.child.pid, "SIGTERM");
+      const t = setTimeout(() => p.child.pid && killTree(p.child.pid, "SIGKILL"), 3000);
+      await Promise.race([exited, new Promise((r) => setTimeout(r, 4000))]);
+      clearTimeout(t);
+    }
+    // Windows: a server started through Git Bash can sit outside the process tree taskkill
+    // walks; whatever still listens on the port it reported is it.
+    const port = p.port ?? Number(/:(\d+)$/.exec(listenUrl(p.output) ?? "")?.[1]);
+    const pid = port ? await listenerPid(port) : undefined;
+    if (pid && pid !== process.pid) killTree(pid);
   }
 
+  /** Stops every process of this run, including ones whose shell already exited. */
   async stopAll(): Promise<void> {
-    await Promise.all(this.running().map((p) => this.stop(p)));
-  }
-}
-
-function kill(pid: number, sig: NodeJS.Signals) {
-  try {
-    if (process.platform === "win32") spawn("taskkill", ["/pid", String(pid), "/T", "/F"]);
-    else process.kill(-pid, sig);
-  } catch {
-    /* already gone */
+    await Promise.all([...this.procs.values()].map((p) => this.stop(p)));
   }
 }
 

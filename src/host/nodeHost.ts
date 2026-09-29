@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { cleanTerminalOutput } from "../tools/output";
+import { commandEnv, commandShell, killTree, spawnCommand } from "./shell";
 import { CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, FileChange, Host } from "./types";
 
 export interface NodeHostOptions {
@@ -85,38 +85,32 @@ export class NodeHost implements Host {
     return { applied: true };
   }
 
+  get shell() {
+    return commandShell().label;
+  }
+
   runCommand(command: string, signal?: AbortSignal, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<CommandResult> {
     const timeoutMs = opts.timeoutMs ?? this.opts.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     return new Promise((resolve) => {
-      // detached: a process group, so a timeout also stops servers the shell started.
-      const p = spawn(command, {
-        cwd: path.join(this.root, opts.cwd ?? "."),
-        shell: true,
-        signal,
-        detached: process.platform !== "win32",
-        env: { ...process.env, MSBUILDTERMINALLOGGER: "off" },
-      });
+      // A process group (POSIX) or taskkill /T (Windows), so a timeout also stops servers the shell started.
+      const p = spawnCommand(command, { cwd: path.join(this.root, opts.cwd ?? "."), env: commandEnv({ MSBUILDTERMINALLOGGER: "off" }) });
       let output = "";
       let timedOut = false;
+      const stop = () => (p.pid ? killTree(p.pid) : p.kill());
       const timer = setTimeout(() => {
         timedOut = true;
-        try {
-          if (p.pid && process.platform !== "win32") process.kill(-p.pid, "SIGTERM");
-          else p.kill();
-        } catch {
-          /* already gone */
-        }
+        stop();
       }, timeoutMs);
-      p.stdout.on("data", (d) => (output += d));
-      p.stderr.on("data", (d) => (output += d));
-      p.on("error", (e) => {
+      signal?.addEventListener("abort", stop, { once: true });
+      const settle = (r: CommandResult) => {
         clearTimeout(timer);
-        resolve({ exitCode: -1, output: output + String(e), timedOut });
-      });
-      p.on("close", (code) => {
-        clearTimeout(timer);
-        resolve({ exitCode: code ?? -1, output: cleanTerminalOutput(output), timedOut });
-      });
+        signal?.removeEventListener("abort", stop);
+        resolve(r);
+      };
+      p.stdout?.on("data", (d) => (output += d));
+      p.stderr?.on("data", (d) => (output += d));
+      p.on("error", (e) => settle({ exitCode: -1, output: output + String(e), timedOut }));
+      p.on("close", (code) => settle({ exitCode: code ?? -1, output: cleanTerminalOutput(output), timedOut }));
     });
   }
 

@@ -12,7 +12,7 @@ const ws = mkdtempSync(path.join(tmpdir(), "la-smoke-ws-"));
 writeFileSync(path.join(ws, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }));
 const userData = mkdtempSync(path.join(tmpdir(), "la-smoke-user-"));
 const tests = path.join(root, "dist/test/smoke.js");
-const args = [ws, "--new-window", `--user-data-dir=${userData}`, "--disable-workspace-trust", "--skip-welcome", "--skip-release-notes"];
+const args = [ws, "--new-window", `--user-data-dir=${userData}`, "--disable-extensions", "--disable-workspace-trust", "--skip-welcome", "--skip-release-notes"];
 
 if (process.env.VSCODE_BIN) {
   // Set when launched from inside VS Code; it would make Electron run as plain Node.
