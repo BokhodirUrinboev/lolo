@@ -59,6 +59,19 @@ async function unreadSources(path: string, ctx: ToolContext): Promise<string[]> 
   return named;
 }
 
+const MOVE_FILE = /\b(?:move|rename)\s+`?([\w./-]+\.\w+)`?\s+(?:to|into|as)\s+`?([\w./-]+\.\w+)`?/gi;
+
+/** The existing file the user's message moves to `path` ("Move billing/utils.py to billing/money/format.py"). */
+async function movedFrom(path: string, ctx: ToolContext): Promise<string | undefined> {
+  for (const m of (ctx.message ?? "").matchAll(MOVE_FILE)) {
+    const from = resolveWorkspacePath(ctx.host.root, m[1]);
+    const to = resolveWorkspacePath(ctx.host.root, m[2]);
+    if ("error" in from || "error" in to || to.path !== path) continue;
+    if ((await ctx.host.stat(from.path)) === "file") return from.path;
+  }
+  return undefined;
+}
+
 /** How many test declarations a write adds to `args.path` (negative when it removes some). */
 async function addedTests(tool: string, args: Record<string, unknown>, ctx: ToolContext): Promise<number> {
   const path = String(args.path);
@@ -199,6 +212,17 @@ export class ToolRegistry {
     // Read before edit (as in Claude Code): models guess the lines of files they haven't seen.
     if (ctx.seen && EDITS_EXISTING.has(tool.name) && typeof args.path === "string" && !ctx.seen.has(args.path) && (await ctx.host.stat(args.path)) === "file") {
       return { ok: false, policy: true, error: `You haven't read ${args.path} in this task. Read it first (read_file), then change it using its exact lines.` };
+    }
+    // "Move a.py to pkg/b.py": creating the target by hand leaves the old file and every import of it behind.
+    if ((tool.name === "create_file" || tool.name === "rewrite_file") && typeof args.path === "string" && (await ctx.host.stat(args.path)) === null) {
+      const from = await movedFrom(args.path, ctx);
+      if (from) {
+        return {
+          ok: false,
+          policy: true,
+          error: `The user asked to move ${from} to ${args.path}: use move_file with from "${from}" and to "${args.path}". It moves the file and updates every import of it; writing ${args.path} by hand leaves ${from} and the old imports behind.`,
+        };
+      }
     }
     // Code moving into a new file: read where it comes from first. Models wrote the new file from the
     // task's words (a tax formula lost its rounding) or as stubs.

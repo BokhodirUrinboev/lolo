@@ -1,7 +1,7 @@
 import { nestedProjectProblem } from "../context/projectChecks";
 import { listFiles } from "../context/repoMap";
 import { decideCommand } from "./commandPolicy";
-import { missingUsings } from "./missingImports";
+import { missingUsings, projectTypes } from "./missingImports";
 import { relativizePaths, truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
 import { startProcess } from "./processes";
@@ -79,7 +79,8 @@ async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Pr
   let fixed = "";
   const changed: string[] = [];
   if (r.exitCode !== 0) {
-    const fix = await missingUsings(r.output, ctx.host.root, (p) => ctx.host.readFile(p));
+    const read = (p: string) => ctx.host.readFile(p);
+    const fix = await missingUsings(r.output, ctx.host.root, read, async () => projectTypes(await listFiles(ctx.host), read));
     if (fix.changes.length && (await ctx.host.proposeWrites(fix.changes, "add missing using directives")).applied) {
       fixed = `${fix.note} Output after that fix:\n`;
       changed.push(...fix.changes.map((c) => c.path));

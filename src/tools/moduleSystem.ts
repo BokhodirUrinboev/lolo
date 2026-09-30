@@ -64,7 +64,7 @@ export async function exportShapeProblem(path: string, before: string, after: st
     for (const m of text.matchAll(pattern)) {
       if (resolveSpec(f, m[2], (p) => files.has(p)) !== path) continue;
       const exported = /^\s*module\.exports\s*=.*$/m.exec(before)?.[0].trim() ?? "";
-      return `${f} loads ${path} with \`${m[0].trim()}\`, which needs the export as it was (\`${exported}\`); after this change it would get ${was === "object" ? "undefined" : "an object"}. Keep the export's shape (or change ${f} first). The file was NOT changed.`;
+      return `${f} loads ${path} with \`${m[0].trim()}\`, which needs the export as it was (\`${exported}\`); after this change it would get ${was === "object" ? "undefined" : "an object"}. Leave the export as it is. The file was NOT changed.`;
     }
   }
   return undefined;

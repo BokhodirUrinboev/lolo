@@ -12,7 +12,7 @@ import { fuzzyApply } from "../src/edit/fuzzyApply";
 import { NodeHost } from "../src/host/nodeHost";
 import { resolveProfile } from "../src/providers/modelProfiles";
 import { createFile, doubleEscaped, editFile, editLines, rewriteFile } from "../src/tools/fileTools";
-import { addUsing, missingUsings, workspacePath } from "../src/tools/missingImports";
+import { addUsing, missingUsings, placeholderNamespaceFix, projectTypes, workspacePath } from "../src/tools/missingImports";
 import { toCommonJs, undefinedExports } from "../src/tools/moduleSystem";
 import { relativizePaths } from "../src/tools/output";
 import { errorContext } from "../src/tools/testReport";
@@ -53,6 +53,16 @@ describe("edit_lines one line short, and a replace escaped twice", () => {
     expect(read("shop.py")).toBe(shop.replace("notes=[]", "notes=None").replace("self.notes = notes\n", "self.notes = notes if notes is not None else []\n"));
     expect(widenForReassignment("x = 1\nx = x + 1\n", 1, 1, "x = 2")).toEqual({ start: 1, end: 1 });
     expect(widenForReassignment("a = 1\nb = 2\n", 1, 1, "a = 3")).toEqual({ start: 1, end: 1 });
+  });
+
+  it("replaces the whole block when an edit_lines range is only its first line", async () => {
+    const lib = "function fee(total) {\n  // Round to cents.\n  return Math.round(total * 3) / 10;\n}\n\nmodule.exports = { fee };\n";
+    const { ctx, read } = workspace({ "lib/fee.js": lib });
+    ctx.edits.forceLineRange("lib/fee.js");
+    const content = "function fee(total) {\n  // Round to cents.\n  return Math.round(total * 3) / 100;\n}";
+    const r = await editLines.run({ path: "lib/fee.js", start_line: 1, end_line: 1, content }, ctx);
+    expect(r.ok).toBe(true);
+    expect(read("lib/fee.js")).toBe(lib.replace("/ 10;", "/ 100;"));
   });
 
   it("unescapes a multi-line `replace` written with \\\\n when `search` is one line", async () => {
@@ -577,6 +587,21 @@ describe("missing using directives", () => {
     expect(r.changes[0].content).toBe("using System.Text.RegularExpressions;\n\nnamespace Demo;\n");
     expect(r.note).toContain("`using System.Text;` to src/Report.cs");
     expect(workspacePath("D:\\other\\A.cs", root)).toBeUndefined();
+  });
+
+  it("adds the using of a type the project declares in another namespace", async () => {
+    const files: Record<string, string> = { "Clocks/IClock.cs": "namespace Shop.Clocks;\n\npublic interface IClock { DateTime Now { get; } }\n", "Greeter.cs": "namespace Shop;\n\npublic class Greeter { }\n" };
+    const read = async (p: string) => files[p];
+    const out = "Greeter.cs(5,22): error CS0246: The type or namespace name 'IClock' could not be found (are you missing a using directive or an assembly reference?)\n";
+    const r = await missingUsings(out, "/ws", read, () => projectTypes(Object.keys(files), read));
+    expect(r.changes).toEqual([{ path: "Greeter.cs", content: "using Shop.Clocks;\n\nnamespace Shop;\n\npublic class Greeter { }\n" }]);
+  });
+
+  it("gives a new file in a placeholder namespace the project's namespace", () => {
+    const others = ["namespace Shop;\n\npublic class Greeter { }\n", "namespace Shop;\npublic class A { }\n"];
+    expect(placeholderNamespaceFix("namespace YourNamespace { public interface IClock { } }", others)).toEqual({ content: "namespace Shop { public interface IClock { } }", from: "YourNamespace", to: "Shop" });
+    expect(placeholderNamespaceFix("namespace Shop.Clocks;\npublic interface IClock { }", others)).toBeUndefined(); // a real sub-namespace
+    expect(placeholderNamespaceFix("namespace MyNamespace;", ["namespace A;", "namespace B;"])).toBeUndefined(); // no single project namespace
   });
 
   it("knows the nullability attributes (NotNullWhen reports its Attribute name too)", async () => {

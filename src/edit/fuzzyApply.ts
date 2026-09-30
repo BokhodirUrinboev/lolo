@@ -178,8 +178,8 @@ const ASSIGNS = /^\s*((?:self\.|this\.)?[A-Za-z_$][\w$.]*)\s*(?::\s*[^=]+)?=(?!=
  * first line and `replace` that line plus its body with one assignment changed. Applied as is, the
  * old lines stay below the new ones (valid code in Python, where the old `self.tags = tags` then
  * overrides the new one). Given the file before and after an applied edit, returns the version where
- * those old lines are replaced: at least two lines, each identical or assigning the same target, at
- * least one identical.
+ * those old lines are replaced: at least two lines, each identical or filling the same slot (the same
+ * assignment target, or both `return`), at least one identical.
  */
 export function retypedTail(original: string, applied: string, startLine: number, searchLines: number): string | undefined {
   const eol = detectEol(original);
@@ -189,7 +189,8 @@ export function retypedTail(original: string, applied: string, startLine: number
   const m = next.length - orig.length + searchLines;
   const repl = next.slice(s, s + m);
   const after = orig.slice(s + searchLines);
-  const target = (l: string) => ASSIGNS.exec(l)?.[1];
+  // The slot a line fills: what it assigns to, or the function's `return`.
+  const target = (l: string) => ASSIGNS.exec(l)?.[1] ?? (/^\s*return\b/.test(l) ? "return" : undefined);
   for (let k = Math.min(m - 1, after.length); k >= 2; k--) {
     const tail = repl.slice(-k);
     const old = after.slice(0, k);

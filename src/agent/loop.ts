@@ -20,7 +20,7 @@ import { mentionsPath, stillReferenced } from "../tools/importPaths";
 import { EXTRACT_PROMPT } from "../tools/webTools";
 import type { WebConfig } from "../web/search";
 import { errorContext, failureReport, lintHints, parseTestFailures } from "../tools/testReport";
-import { missingUsings } from "../tools/missingImports";
+import { missingUsings, projectTypes } from "../tools/missingImports";
 import { relativizePaths } from "../tools/output";
 import type { McpHub, McpToolDef } from "../mcp/hub";
 import { selectMcpTools } from "../mcp/select";
@@ -166,13 +166,24 @@ const MAX_CONSECUTIVE_FAILURES = 4;
  */
 export function repeatsLine(text: string, times = 16): boolean {
   const lines = text.split(/\\n|\n/).slice(0, -1); // the last one may still be growing
-  for (let period = 1; period <= 8; period++) {
-    const n = Math.max(times, period * 6);
+  if (cycles(lines, 1, (p) => Math.max(times, p * 6))) return true;
+  // The same shape with other names: `function calculateTaxFromItems(items) { return items.reduce(...) }`
+  // for every combination the model can think of. Only blocks, repeated at length (similar one-liners
+  // such as constant tables are normal code).
+  const shapes = lines.map((l) => l.replace(/[A-Za-z_$][\w$]*/g, "x").replace(/\d+(\.\d+)?/g, "0"));
+  return cycles(shapes, 2, (p) => Math.max(40, p * 10));
+}
+
+/** Whether `lines` end with a block of `minPeriod`..8 lines repeated over at least `length(period)` lines. */
+function cycles(lines: string[], minPeriod: number, length: (period: number) => number): boolean {
+  for (let period = minPeriod; period <= 8; period++) {
+    const n = length(period);
     if (lines.length < n) break;
     const tail = lines.slice(-n);
     const block = tail.slice(0, period);
-    // A block needs real content: `}` or a/b alternating lines are not a loop.
-    if (block.join("").replace(/\s/g, "").length < (period === 1 ? 3 : 8)) continue;
+    // A block needs real content: `}` or a/b alternating lines are not a loop; a block of one repeated
+    // line is left to period 1 (for shapes, a table of one-liners).
+    if (block.join("").replace(/\s/g, "").length < (period === 1 ? 3 : 8) || (period > 1 && new Set(block).size < 2)) continue;
     if (tail.every((l, i) => l === block[i % period])) return true;
   }
   return false;
@@ -779,7 +790,8 @@ export class Agent {
       let r = await host.runCommand(cmd, undefined, { timeoutMs: 300_000 }); // first build may restore packages
       let fixed = "";
       if (r.exitCode !== 0) {
-        const fix = await missingUsings(r.output, host.root, (p) => host.readFile(p));
+        const read = (p: string) => host.readFile(p);
+        const fix = await missingUsings(r.output, host.root, read, async () => projectTypes(await listFiles(host), read));
         if (fix.changes.length && (await host.proposeWrites(fix.changes, "add missing using directives")).applied) {
           onChange?.(fix.changes.map((c) => c.path));
           fixed = `${fix.note}\n`;

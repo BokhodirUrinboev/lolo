@@ -8,6 +8,7 @@ import { checkEditSyntax, findImbalance, fixCSharpEscapes, syntaxRepairs } from 
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
 import { exportShapeProblem, moduleSystemMismatch, moduleSystemProblem, toCommonJs, undefinedExports } from "./moduleSystem";
 import { committedVersion } from "./gitTools";
+import { placeholderNamespaceFix } from "./missingImports";
 import { IGNORED_DIRS } from "./paths";
 import { symbolSummary } from "./output";
 import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
@@ -328,6 +329,10 @@ async function redefinition(path: string, original: string, search: string, repl
   return { content, name: def.name, from: def.line, to: def.endLine };
 }
 
+const RETYPED_NOTE = " (the end of your new text re-typed the lines after the ones you replaced, some changed; the old ones were replaced, not left below)";
+const OVERLAP_NOTE = " (your new text repeated the lines next to the ones you replaced; they were replaced, not duplicated)";
+const BLOCK_NOTE = " (you replaced only the first line of a block with a complete block, so it replaced the whole old block)";
+
 const BRACE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|cs|java|kt|go|rs|c|h|cpp|hpp|cc|swift|php|dart|scala)$/i;
 
 /** `fragment`: the text the model wrote for this edit (to spot a reply cut off by an unescaped quote). */
@@ -384,6 +389,14 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
   if (csEscapes.fixed) {
     content = csEscapes.text;
     note += " (regex escapes such as \\s in normal C# strings were written as \\\\s: C# accepts only \\n, \\t, \\\\ and the like there)";
+  }
+  if (isNew && /\.cs$/i.test(path)) {
+    const others = (await listFiles(ctx.host)).filter((f) => /\.cs$/i.test(f) && f !== path && !/(^|\/)(bin|obj)\//.test(f)).slice(0, 50);
+    const ns = placeholderNamespaceFix(content, await Promise.all(others.map((f) => ctx.host.readFile(f).catch(() => ""))));
+    if (ns) {
+      content = ns.content;
+      note += ` (\`namespace ${ns.from}\` is a placeholder; the project's code is in \`${ns.to}\`, so the file uses that)`;
+    }
   }
   if (before !== undefined) content = matchFileEnding(before, content);
   if (content === before) {
@@ -515,7 +528,7 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
       const retyped = !whole && !a.all ? retypedTail(original, content, r.startLine, searchLines) : undefined;
       if (retyped && !(await checkEditSyntax(a.path, original, retyped))) {
         content = retyped;
-        note += " (the end of your `replace` re-typed the lines after `search`, some changed; the old ones were replaced, not left below)";
+        note += RETYPED_NOTE;
       }
       // `replace` repeating the lines around `search` (a second closing brace): replace them instead, if that parses.
       if (!whole && !retyped && !a.all && (await checkEditSyntax(a.path, original, content, a.replace))) {
@@ -523,7 +536,7 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
         for (const c of overlapCandidates(original, content, r.startLine, searchLines)) {
           if (await checkEditSyntax(a.path, original, c)) continue;
           content = c;
-          note += " (your `replace` repeated lines next to `search`; they were replaced, not duplicated)";
+          note += OVERLAP_NOTE;
           repaired = true;
           break;
         }
@@ -531,7 +544,7 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
         for (const c of repaired ? [] : blockCandidates(original, r.startLine, a.search, a.replace, findImbalance)) {
           if (await checkEditSyntax(a.path, original, c)) continue;
           content = c;
-          note += " (`search` was only the first line of a block and `replace` a complete block, so it replaced the whole old block)";
+          note += BLOCK_NOTE;
           break;
         }
       }
@@ -608,11 +621,31 @@ export const editLines: ToolDef<{ path: string; start_line: number; end_line: nu
     const range = widenForReassignment(original, a.start_line, a.end_line, a.content);
     const r = applyLineRange(original, range.start, range.end, a.content);
     if (!r.ok) return fail(`edit_lines failed: ${r.reason}`);
-    const widened =
+    let note =
       range.start !== a.start_line || range.end !== a.end_line
         ? ` (the old assignment next to your range would have overridden your new one, so lines ${range.start}-${range.end} were replaced)`
         : "";
-    return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${range.start}-${range.end}`, escapeNote(a) + widened, a.content);
+    // The same slips as with `edit`: a range that is only a block's first line, new text re-typing the lines after it.
+    let content = r.content;
+    const count = range.end - range.start + 1;
+    if (count > 0) {
+      const retyped = retypedTail(original, content, range.start, count);
+      if (retyped && !(await checkEditSyntax(a.path, original, retyped))) {
+        content = retyped;
+        note += RETYPED_NOTE;
+      } else if (await checkEditSyntax(a.path, original, content, a.content)) {
+        const rangeText = toLf(original).split("\n").slice(range.start - 1, range.end).join("\n");
+        const overlap = overlapCandidates(original, content, range.start, count).map((c) => ({ c, why: OVERLAP_NOTE }));
+        const block = blockCandidates(original, range.start, rangeText, a.content, findImbalance).map((c) => ({ c, why: BLOCK_NOTE }));
+        for (const { c, why } of [...overlap, ...block]) {
+          if (await checkEditSyntax(a.path, original, c)) continue;
+          content = c;
+          note += why;
+          break;
+        }
+      }
+    }
+    return write(ctx, a.path, content, false, `edit_lines ${a.path}:${range.start}-${range.end}`, escapeNote(a) + note, a.content);
   },
 };
 

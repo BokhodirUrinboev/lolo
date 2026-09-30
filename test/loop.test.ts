@@ -117,6 +117,15 @@ describe("agent loop", () => {
     expect(read2("src/fee.js")).toContain("// matches the expected output");
   });
 
+  it("points at move_file when the model writes the target of a requested move by hand", async () => {
+    const { root } = workspace({ "shop/helpers.py": "def total(xs):\n    return sum(xs)\n", "main.py": "from shop.helpers import total\n" });
+    const create = act("create_file", { path: "shop/math/totals.py", content: "def total(xs):\n    return sum(xs)\n" });
+    const provider = new Scripted([plan(["Create shop/math/totals.py with the code of shop/helpers.py"]), act("read_file", { path: "shop/helpers.py" }), create, act("done", { summary: "ok" })]);
+    const r = await run(root, provider, "Move shop/helpers.py to shop/math/totals.py and update every import of it.");
+    expect(JSON.stringify(provider.seen.at(-1))).toMatch(/use move_file with from \\"shop\/helpers.py\\" and to \\"shop\/math\/totals.py\\"/);
+    expect(r.stats.refusedCalls).toBe(1);
+  });
+
   it("reminds the model to act after five reads in a row", async () => {
     const { root } = workspace({ "a.txt": "x\n", "b.txt": "y\n" });
     const reads = [act("read_file", { path: "a.txt" }), act("read_file", { path: "b.txt" }), act("list_dir", {}), act("search", { query: "x" }), act("search", { query: "y" })];
@@ -212,6 +221,13 @@ describe("agent loop", () => {
     expect(repeatsLine(`{"search":"def cheapest(items):\\n${block.repeat(7)}`)).toBe(true);
     expect(repeatsLine(`{"search":"def cheapest(items):\\n${block.repeat(3)}`)).toBe(false);
     expect(repeatsLine("case 1:\n  return a;\ncase 2:\n  return b;\n".repeat(3))).toBe(false);
+    // The same function shape with new names, over and over.
+    const names = ["Gross", "Tax", "Net"].flatMap((k) => ["Items", "Amounts", "Lines", "Rows", "Orders"].map((s) => `${k}From${s}`));
+    const shaped = names.map((n) => `function calculate${n}(items) {\\n  return items.reduce((total, item) => total + item.${n.toLowerCase()}, 0);\\n}\\n\\n`).join("");
+    expect(repeatsLine(`{"content":"const x = 1;\\n${shaped}`)).toBe(true);
+    // A table of similar one-liners, and a handful of similar functions, are normal code.
+    expect(repeatsLine(Array.from({ length: 60 }, (_, i) => `  CODE_${i} = ${i},`).join("\n") + "\n")).toBe(false);
+    expect(repeatsLine(shaped.split("\\n\\n").slice(0, 6).join("\\n\\n") + "\\n\\n")).toBe(false);
     const { root } = workspace({ "a.js": "let a = 1;\n" });
     const loop = JSON.stringify({ thought: "rewrite", action: { tool: "rewrite_file", args: { path: "a.js", content: `let a = 1${'.replace(" ", "-")\n'.repeat(40)}` } } });
     const provider = new Scripted([plan(["Change a.js"]), act("read_file", { path: "a.js" }), loop, act("done", { summary: "ok" })]);
