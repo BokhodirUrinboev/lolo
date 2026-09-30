@@ -19,7 +19,31 @@ interface FileCommand extends SlashCommand {
   template: string;
 }
 
+/** Built in; a `.agent/commands` file with the same name replaces one. Both only read: the answer is the result. */
+const BUILTIN: FileCommand[] = [
+  {
+    name: "review",
+    description: "Review my uncommitted changes for bugs",
+    // Worded as a question ("What ..."), so the message is classified as read-only by code (planner.ts: allowedKinds).
+    template:
+      "What problems do my uncommitted changes have? Read them with git_diff, and the code around them where needed. " +
+      "Answer with the problems you find (bugs, missed cases, broken callers), each with its file and line, most serious first; say so if you find none.\n\n$ARGUMENTS",
+  },
+  {
+    name: "commit-message",
+    description: "Write a commit message for my uncommitted changes",
+    template:
+      "What commit message fits my uncommitted changes? Read them with git_diff. " +
+      "Answer with the message only: a subject line under 72 characters in the imperative, a blank line, then a few lines on what was done and why.\n\n$ARGUMENTS",
+  },
+];
+
 async function fileCommands(host: Host): Promise<FileCommand[]> {
+  const own = await projectCommands(host);
+  return [...own, ...BUILTIN.filter((b) => !own.some((c) => c.name === b.name))];
+}
+
+async function projectCommands(host: Host): Promise<FileCommand[]> {
   if ((await host.stat(COMMANDS_DIR)) !== "dir") return [];
   const out: FileCommand[] = [];
   for (const e of (await host.listDir(COMMANDS_DIR)).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -53,5 +77,5 @@ export async function expandSlashCommand(text: string, host: Host, mcp?: McpHub)
   }
   const cmd = (await fileCommands(host)).find((c) => c.name === name.toLowerCase());
   if (!cmd) return undefined;
-  return cmd.template.includes("$ARGUMENTS") ? cmd.template.replace(/\$ARGUMENTS/g, args.trim()) : [cmd.template, args.trim()].filter(Boolean).join("\n\n");
+  return (cmd.template.includes("$ARGUMENTS") ? cmd.template.replace(/\$ARGUMENTS/g, args.trim()) : [cmd.template, args.trim()].filter(Boolean).join("\n\n")).trim();
 }

@@ -27,7 +27,7 @@ import { selectMcpTools } from "../mcp/select";
 import { Action, AgentMode, ToolRegistry } from "../tools/registry";
 import type { ToolContext, ToolDef, ToolResult } from "../tools/types";
 import { History, mergeConsecutive } from "./compaction";
-import { toolNeeds } from "./needs";
+import { statesConvention, toolNeeds } from "./needs";
 import { protectTests } from "./testGuard";
 import { makePlan } from "./planner";
 import { PLAN_REQUEST, QUESTION_NOTE, systemPrompt, taskMessage, todoPrompt } from "./prompts";
@@ -385,8 +385,9 @@ export class Agent {
       return { ok: true, summary: `Already done: ${renamed[0]} was renamed to ${renamed[1]} everywhere.` };
     }
     // A later todo that updates the imports of a file move_file already moved (planners split "move X" into move + fix imports).
-    const moved = [...(ctx.moved ?? [])].find(([from]) => mentionsPath(todos[index], from));
-    if (moved && /\b(import|require|reference|usage|use|point|update|fix)/i.test(todos[index]) && !(await stillReferenced(ctx, moved[0]))) {
+    // Also a later todo that restates the move itself ("Move the content of a.py to b.py"): the model moved the file back.
+    const moved = [...(ctx.moved ?? [])].find(([from, to]) => mentionsPath(todos[index], from) || mentionsPath(todos[index], to));
+    if (moved && /\b(import|require|reference|usage|use|point|update|fix|mov(e|ing)|content|cop(y|ies)|creat\w*)/i.test(todos[index]) && !(await stillReferenced(ctx, moved[0]))) {
       history.note(`Todo ${index + 1} was already done: move_file updated every import of ${moved[0]} (now ${moved[1]}).`);
       log?.write("todo_done", { index, summary: "already done by move_file", auto: "move" });
       return { ok: true, summary: `Already done: the imports of ${moved[0]} were updated when it moved to ${moved[1]}.` };
@@ -398,6 +399,10 @@ export class Agent {
     ctx.mcpTools = selectMcpTools(this.registry.all.filter((t): t is McpToolDef => t.group === "mcp"), todos[index], s.task);
     const extra = this.registry.enabled(mode, ctx).filter((t) => t.group && t.group !== "symbols");
     if (extra.length) history.note(`Extra tools for this todo:\n${this.registry.describe(extra)}`);
+    // A convention said in passing: offered to memory once, at the last todo; the user reviews the write.
+    if (mode === "agent" && index === todos.length - 1 && statesConvention(s.task) && extra.some((t) => t.name === "remember")) {
+      history.note("The user's message states a lasting convention of this project. After the work, if it isn't in the project memory yet, save it with remember (one sentence); the user reviews it.");
+    }
     if (ctx.needs.has("web") && !ctx.web && /(^|\s)@web\b/.test(s.task)) {
       history.note("Web access is off, so you cannot search the web. Answer from the code and what you know, and tell the user that web search can be enabled in the setting localAgent.web.search.");
     }

@@ -126,6 +126,17 @@ describe("agent loop", () => {
     expect(r.stats.refusedCalls).toBe(1);
   });
 
+  it("offers to remember a convention the user states in passing", async () => {
+    const { root } = workspace({ "src/a.js": "exports.hi = () => \"hi\";\n" });
+    const provider = new Scripted([plan(["Change the greeting in src/a.js to hello"]), act("done", { summary: "ok" })]);
+    await run(root, provider, "We always use single quotes. Change the greeting in src/a.js to hello.");
+    expect(JSON.stringify(provider.seen[1])).toMatch(/states a lasting convention/);
+    expect(JSON.stringify(provider.schemas[1])).toContain('"remember"');
+    const plain = new Scripted([plan(["Change the greeting in src/a.js to hello"]), act("done", { summary: "ok" })]);
+    await run(workspace({ "src/a.js": "x\n" }).root, plain, "Change the greeting in src/a.js to hello.");
+    expect(JSON.stringify(plain.schemas[1])).not.toContain('"remember"');
+  });
+
   it("reminds the model to act after five reads in a row", async () => {
     const { root } = workspace({ "a.txt": "x\n", "b.txt": "y\n" });
     const reads = [act("read_file", { path: "a.txt" }), act("read_file", { path: "b.txt" }), act("list_dir", {}), act("search", { query: "x" }), act("search", { query: "y" })];
@@ -210,6 +221,20 @@ describe("agent loop", () => {
     expect(JSON.stringify(provider.seen[3])).toMatch(/haven't read billing\/report.py/);
     expect(r.status).toBe("done");
     expect(r.summary).toMatch(/Already done: the imports of billing\/utils.py were updated/);
+  });
+
+  it("completes later todos that restate a move move_file already did", async () => {
+    const { root, read } = workspace({ "shop/__init__.py": "", "shop/helpers.py": "def total(xs):\n    return sum(xs)\n", "main.py": "from shop.helpers import total\n" });
+    const provider = new Scripted([
+      plan(["Create the new file shop/math/totals.py", "Move the content of shop/helpers.py to shop/math/totals.py", "Update the imports of shop/helpers.py"]),
+      act("move_file", { from: "shop/helpers.py", to: "shop/math/totals.py" }),
+      act("done", { summary: "moved" }),
+      act("move_file", { from: "shop/math/totals.py", to: "shop/helpers.py" }), // must never run
+    ]);
+    const r = await run(root, provider, "Move shop/helpers.py to shop/math/totals.py and update every import of it.");
+    expect(r.status).toBe("done");
+    expect(read("main.py")).toBe("from shop.math.totals import total\n");
+    expect(provider.seen).toHaveLength(3); // the planner, then two steps of todo 1
   });
 
   it("stops a reply that repeats one line over and over", async () => {

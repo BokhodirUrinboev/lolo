@@ -4,6 +4,7 @@ import { restoreCopiedEscapes } from "../edit/escapes";
 import { applyLineRange, editToolFor, EditState, EditTool, isLazyPlaceholder, isStub, mergeLazyRewrite, widenForReassignment } from "../edit/formats";
 import { blockCandidates, fuzzyApply, overlapCandidates, reindent, retypedTail } from "../edit/fuzzyApply";
 import { jsRuntimeProblem } from "../edit/jsChecks";
+import { pyRuntimeProblem } from "../edit/pyChecks";
 import { checkEditSyntax, findImbalance, fixCSharpEscapes, syntaxRepairs } from "../edit/syntaxGuard";
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
 import { exportShapeProblem, moduleSystemMismatch, moduleSystemProblem, toCommonJs, undefinedExports } from "./moduleSystem";
@@ -434,7 +435,10 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
     note += ` (${repaired.note})`;
   }
   // Mistakes that parse but throw once the code runs, often where the tests don't look.
-  const runtime = (await jsRuntimeProblem(path, before, content)) ?? (before !== undefined ? await exportShapeProblem(path, before, content, ctx) : undefined);
+  const runtime =
+    (await jsRuntimeProblem(path, before, content)) ??
+    (await pyRuntimeProblem(path, before, content)) ??
+    (before !== undefined ? await exportShapeProblem(path, before, content, ctx) : undefined);
   if (runtime && !insists(ctx, path, content)) return fail(runtime, `${reason}: rejected (would fail at runtime)`);
   const undone = before !== undefined ? await undoesKeptChange(ctx, path, before, content) : undefined;
   if (undone && !insists(ctx, path, content)) return fail(undone, `${reason}: rejected (undoes what the user asked to keep)`);

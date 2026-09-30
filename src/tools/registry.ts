@@ -11,7 +11,7 @@ import { remember } from "./memoryTool";
 import { resolveWorkspacePath, writeForbidden } from "./paths";
 import { processLogs, startProcess } from "./processes";
 import { runCommand } from "./runCommand";
-import { search, semanticSearch } from "./search";
+import { search } from "./search";
 import { findDefinition, findReferences, renameSymbol } from "./symbolTools";
 import { fetchUrl, webSearchTool } from "./webTools";
 import type { ToolContext, ToolDef } from "./types";
@@ -25,7 +25,7 @@ export type AgentMode = "ask" | "agent" | "plan";
  * from the planner, and the loop itself asks the user only when a todo is stuck.
  */
 export const ALL_TOOLS: ToolDef[] = [
-  readFile, readSymbol, search, semanticSearch, listDir, getDiagnostics,
+  readFile, readSymbol, search, listDir, getDiagnostics,
   editFile, rewriteFile, editLines, createFile, runCommand,
   findDefinition, findReferences, renameSymbol,
   moveFile, deleteFile, gitDiff, gitLog, gitBlame,
