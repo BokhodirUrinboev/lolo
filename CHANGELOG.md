@@ -20,6 +20,16 @@ Evaluation, 38 tasks × 2 runs, RTX 4070 Ti (Windows 11):
 
 qwen2.5-coder:7b now meets all three targets of the plan (task pass over three runs: 90.8%, 88.2%, 89.5%). It still fails `go-chunk` (it decides the loop is already right) and often `git-fix-uncommitted` (arithmetic).
 
+**Fine-tune, retrained** on 4,059 samples from the passing runs (the same 12 tasks held out as before; the first `lolo-coder` had 2,044). On the 12 held-out tasks, 4 runs each, all with this orchestration:
+
+| | qwen2.5-coder:7b | lolo-coder (first) | lolo-coder (new) |
+|---|---|---|---|
+| task pass | 79.2% | 72.9% | 83.3% |
+| edit apply | 87.9% | 94.3% | 91.2% |
+| tool-call validity | 99.4% | 99.4% | 98.6% |
+
+The new model passes 2 more of the 48 held-out runs than the base model and 5 more than the first fine-tune: a small gain next to what orchestration gave the base model on the same tasks (72.9% → 79.2%).
+
 ## 0.5.0
 
 Stage 14 of the plan: Windows, a much larger evaluation, and the agent fixes it found.
