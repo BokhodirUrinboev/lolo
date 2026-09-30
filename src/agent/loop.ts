@@ -451,7 +451,8 @@ export class Agent {
         history.note("Stop looking: you have what you need. Call answer now with the best answer from what you found above.");
         return undefined;
       }
-      if (mode === "agent" && onlyLooking && !forcedWrite && !/^\s*(run|execute|verify|check|test|start)\b/i.test(todos[index])) {
+      // Only before the todo changed anything: after a change, a forced write is a guess (qwen3.5 removed a working `return`).
+      if (mode === "agent" && onlyLooking && !changedInTodo && !forcedWrite && !/^\s*(run|execute|verify|check|test|start)\b/i.test(todos[index])) {
         writeNow = forcedWrite = true;
         failures = 0;
         repeats = 0;

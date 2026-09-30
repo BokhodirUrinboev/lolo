@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+Fixes for every failure of the 0.5.0 evaluation, done by code:
+
+- `node --test` failures are understood (its output without a terminal is TAP), and failing tests show the line of the assertion. Python's shared mutable default arguments are pointed out.
+- JavaScript that would throw at runtime is refused: a variable declared twice, `const tax = tax(a)`, undefined names, an export whose shape breaks another file's import.
+- More edit repairs: a whole function or block replaced when only its first line was quoted (also with `edit_lines`), re-typed lines not left behind, a line range one line short, regex escapes lost in JSON, C# regex escapes (CS1009), missing `using` for the project's own types, placeholder namespaces.
+- No tests the user didn't ask for; no "move" done by hand instead of move_file; no reverting a change the user asked to keep; comment-only "fixes" and redone changes are no-ops.
+- Runaway replies that repeat a block of code are stopped early.
+
+Evaluation, 38 tasks × 2 runs, RTX 4070 Ti (Windows 11):
+
+| | qwen2.5-coder:7b | qwen3.5:9b | target |
+|---|---|---|---|
+| tool-call validity | 98.7% → 98.7% | 99.8% → 99.4% | ≥ 98% |
+| edit apply | 89.6% → 95.5% | 95.8% → 99.0% | ≥ 95% |
+| task pass | 78.9% → 89.5% | 93.4% → 96.1% | ≥ 60% |
+
+qwen2.5-coder:7b now meets all three targets of the plan (task pass over three runs: 90.8%, 88.2%, 89.5%). It still fails `go-chunk` (it decides the loop is already right) and often `git-fix-uncommitted` (arithmetic).
+
 ## 0.5.0
 
 Stage 14 of the plan: Windows, a much larger evaluation, and the agent fixes it found.
