@@ -15,6 +15,9 @@ add("System.Text.Json", "JsonSerializer JsonSerializerOptions JsonDocument JsonE
 add("System.Text.Json.Serialization", "JsonPropertyName JsonIgnore JsonConverter JsonStringEnumConverter");
 add("System.Globalization", "CultureInfo NumberStyles DateTimeStyles");
 add("System.Diagnostics", "Stopwatch Debug Process Trace");
+// Nullability attributes models add to Equals/TryGet overrides after a CS8765 warning.
+add("System.Diagnostics.CodeAnalysis", "NotNullWhen NotNullWhenAttribute MaybeNullWhen MaybeNullWhenAttribute NotNull MaybeNull AllowNull DisallowNull MemberNotNull MemberNotNullWhen DoesNotReturn SetsRequiredMembers ExcludeFromCodeCoverage");
+add("System.Runtime.CompilerServices", "CallerMemberName CallerFilePath CallerLineNumber");
 add("System.Collections.Concurrent", "ConcurrentDictionary ConcurrentQueue ConcurrentBag ConcurrentStack BlockingCollection");
 add("System.Collections.Immutable", "ImmutableArray ImmutableList ImmutableDictionary ImmutableHashSet");
 add("System.Collections.ObjectModel", "ObservableCollection ReadOnlyCollection ReadOnlyDictionary Collection");

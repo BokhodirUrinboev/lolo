@@ -1,9 +1,18 @@
 // JSON has no `\s`, `\d`, `\w` escapes, so under schema-constrained decoding a model copying a regex
 // can't write them as it would in code: `[^\s@]` came out as `[^` + line break + `@]`, as `[^` + line
-// break + `\s@]`, or as `[^\ @]`, and `/^\+?[0-9]/` as `/^` + line break + `\+?[0-9]/`. The code it
-// copies is known (files read in this run), so broken copies of known lines are restored.
+// break + `\s@]`, as `[^\` + line break + `@]` (the letter lost, the backslash kept; `\+` too), or as
+// `[^\ @]`, and `/^\+?[0-9]/` as `/^` + line break + `\+?[0-9]/`. The code it copies is known (files
+// read in this run), so broken copies of known lines are restored.
 
-const GLUES = ["", "\\s", "\\d", "\\w", "\\S", "\\D", "\\W", "\\b"];
+/**
+ * What the line break may stand for at `pos` of known line `k`: nothing, or the escape there (`\s`,
+ * `\.`, `\+`), possibly with the quantifier after it that went too (`\+?`).
+ */
+function glues(k: string, pos: number): string[] {
+  if (k[pos - 1] === "\\") return [k[pos]]; // the backslash stayed: the escaped character was lost
+  if (k[pos] !== "\\") return [""];
+  return ["", k.slice(pos, pos + 2), ...(/[?*+]/.test(k[pos + 2] ?? "") ? [k.slice(pos, pos + 3)] : [])];
+}
 
 /** `text` with broken copies of `known` lines restored; `fixed` counts them. */
 export function restoreCopiedEscapes(text: string, known: Iterable<string>): { text: string; fixed: number } {
@@ -48,7 +57,7 @@ function rejoin(head: string, src: string[], from: number, lines: Set<string>): 
     for (let j = from; j < src.length && j < from + 6; j++) {
       const piece = src[j];
       if (!piece || /^\s/.test(piece)) break;
-      const glue = GLUES.find((g) => k.startsWith(g + piece, pos));
+      const glue = glues(k, pos).find((g) => k.startsWith(g + piece, pos));
       if (glue === undefined) break;
       pos += glue.length + piece.length;
       if (pos === k.length) return { line: k, used: j - from + 1 };

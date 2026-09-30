@@ -1,5 +1,5 @@
 import { namedFiles } from "../agent/planner";
-import { isTestFile, TESTS_PROTECTED } from "../agent/testGuard";
+import { asksForTests, countTests, isTestFile, NO_NEW_TESTS, TESTS_PROTECTED } from "../agent/testGuard";
 import { enabledEditTools } from "../edit/formats";
 import { answer, done } from "./control";
 import { getDiagnostics } from "./diagnostics";
@@ -57,6 +57,26 @@ async function unreadSources(path: string, ctx: ToolContext): Promise<string[]> 
     if ((await ctx.host.stat(r.path)) === "file") named.push(r.path);
   }
   return named;
+}
+
+/** How many test declarations a write adds to `args.path` (negative when it removes some). */
+async function addedTests(tool: string, args: Record<string, unknown>, ctx: ToolContext): Promise<number> {
+  const path = String(args.path);
+  const current = (await ctx.host.stat(path)) === "file" ? await ctx.host.readFile(path) : "";
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  switch (tool) {
+    case "create_file":
+    case "rewrite_file":
+      return countTests(str(args.content)) - countTests(current);
+    case "edit":
+      return countTests(str(args.replace)) - countTests(str(args.search));
+    case "edit_lines": {
+      const lines = current.replace(/\r\n/g, "\n").split("\n");
+      return countTests(str(args.content)) - countTests(lines.slice(Number(args.start_line) - 1, Number(args.end_line)).join("\n"));
+    }
+    default:
+      return 0;
+  }
 }
 
 export interface Action {
@@ -192,6 +212,10 @@ export class ToolRegistry {
     const target = typeof args.path === "string" ? args.path : typeof args.from === "string" ? args.from : undefined;
     if (ctx.protectTests && tool.kind === "write" && tool.name !== "create_file" && target && isTestFile(target) && (await ctx.host.stat(target)) === "file") {
       return { ok: false, policy: true, error: `${target} ${TESTS_PROTECTED}` };
+    }
+    // New tests nobody asked for (updating existing ones, e.g. in a rename, stays allowed).
+    if (ctx.message !== undefined && !asksForTests(ctx.message) && tool.kind === "write" && target && isTestFile(target) && (await addedTests(tool.name, args, ctx)) > 0) {
+      return { ok: false, policy: true, error: `${target}: ${NO_NEW_TESTS}` };
     }
     const semantic = await tool.check?.(args, ctx);
     if (semantic) return { ok: false, error: semantic };

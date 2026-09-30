@@ -19,7 +19,7 @@ import { codeStillUses } from "../tools/symbolTools";
 import { mentionsPath, stillReferenced } from "../tools/importPaths";
 import { EXTRACT_PROMPT } from "../tools/webTools";
 import type { WebConfig } from "../web/search";
-import { errorContext, failureReport } from "../tools/testReport";
+import { errorContext, failureReport, lintHints, parseTestFailures } from "../tools/testReport";
 import { missingUsings } from "../tools/missingImports";
 import { relativizePaths } from "../tools/output";
 import type { McpHub, McpToolDef } from "../mcp/hub";
@@ -159,14 +159,23 @@ function mcpSummary(tools: McpToolDef[]): string {
 /** Stop and ask the user after this many consecutive failed or invalid steps. */
 const MAX_CONSECUTIVE_FAILURES = 4;
 /**
- * Whether the reply so far ends with the same line many times in a row. Lines are split on
- * real line breaks and on `\n` escapes, since file content inside the JSON reply is escaped.
+ * Whether the reply so far ends with the same line, or the same block of up to 8 lines, many
+ * times in a row (qwen2.5-coder repeated a comment, a commented-out `return` and a blank line
+ * until the token limit). Lines are split on real line breaks and on `\n` escapes, since file
+ * content inside the JSON reply is escaped.
  */
 export function repeatsLine(text: string, times = 16): boolean {
   const lines = text.split(/\\n|\n/).slice(0, -1); // the last one may still be growing
-  if (lines.length < times) return false;
-  const tail = lines.slice(-times);
-  return tail[0].trim().length >= 3 && tail.every((l) => l === tail[0]);
+  for (let period = 1; period <= 8; period++) {
+    const n = Math.max(times, period * 6);
+    if (lines.length < n) break;
+    const tail = lines.slice(-n);
+    const block = tail.slice(0, period);
+    // A block needs real content: `}` or a/b alternating lines are not a loop.
+    if (block.join("").replace(/\s/g, "").length < (period === 1 ? 3 : 8)) continue;
+    if (tail.every((l, i) => l === block[i % period])) return true;
+  }
+  return false;
 }
 
 /** Tools whose written content the model wrote itself (so it has "seen" the file afterwards). */
@@ -263,7 +272,7 @@ export class Agent {
       } else {
         emit({ type: "status", text: "Planning" });
         const plan = await makePlan(provider, prefix, signal, task);
-        log?.llm("plan", [...prefix, plan.messages[0]], plan.messages[1].content, {});
+        log?.llm("plan", [...prefix, plan.messages[0]], plan.messages[1].content, plan.raw.trim() !== plan.messages[1].content ? { raw: plan.raw } : {});
         log?.write("classified", { kind: plan.kind });
         if (plan.kind === "chat") return finish("done", plan.reply);
         if (plan.kind === "question") {
@@ -398,7 +407,7 @@ export class Agent {
       if (!changedInTodo) return false;
       const checks = s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host);
       if (!checks.length) return allowNoChecks;
-      return !(await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f))));
+      return !(await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f)), ctx.seen));
     };
     const completeAuto = (why: string) => {
       const summary = `Completed: ${todos[index]}.`;
@@ -412,6 +421,15 @@ export class Agent {
      */
     /** Question mode, stuck: the model has usually read enough but keeps looking. Only `answer` is offered from now on. */
     let answerNow = false;
+    /**
+     * Agent mode, stuck while only looking (git_diff, git_blame, read_file, search in a circle): it has
+     * seen the code but doesn't dare to change it. Once per todo, only the file-writing tools are offered
+     * until a write applies.
+     */
+    let writeNow = false;
+    let forcedWrite = false;
+    /** No write was attempted (even a refused one) since the last write that applied. */
+    let onlyLooking = true;
     const onStuck = async (problem: string, failSummary: string) => {
       if (await checksPass(false)) return completeAuto("stuck, but checks pass");
       if (mode === "ask" && !answerNow) {
@@ -420,6 +438,15 @@ export class Agent {
         repeats = 0;
         log?.write("stuck", { forceAnswer: true });
         history.note("Stop looking: you have what you need. Call answer now with the best answer from what you found above.");
+        return undefined;
+      }
+      if (mode === "agent" && onlyLooking && !forcedWrite && !/^\s*(run|execute|verify|check|test|start)\b/i.test(todos[index])) {
+        writeNow = forcedWrite = true;
+        failures = 0;
+        repeats = 0;
+        seen = new Set();
+        log?.write("stuck", { forceWrite: true });
+        history.note("Stop looking: you have read the code this todo is about. Make the change now: edit the file (or rewrite it) with your best fix.");
         return undefined;
       }
       const go = await this.unstick(index, todos, history, problem);
@@ -446,7 +473,8 @@ export class Agent {
       const compacted = history.compactIfNeeded(historyBudget);
       if (compacted) log?.write("compaction", { turns: compacted });
 
-      const enabled = this.registry.enabled(mode, ctx).filter((t) => !answerNow || t.name === "answer");
+      const forced = (t: ToolDef) => (!answerNow || t.name === "answer") && (!writeNow || MODEL_WRITES.has(t.name));
+      const enabled = this.registry.enabled(mode, ctx).filter(forced);
       // Built exactly like the planner call, so the planner's prefix is reused from the KV cache.
       const messages = mergeConsecutive([...s.prefix, ...history.messages()]);
       const t0 = Date.now();
@@ -496,11 +524,12 @@ export class Agent {
       if (!enabled.some((t) => t.name === action.tool)) {
         const wanted = this.registry.all.find((t) => t.name === action.tool);
         if (wanted?.group && this.unlockGroup(wanted, ctx)) {
-          offered = this.registry.enabled(mode, ctx).filter((t) => !answerNow || t.name === "answer");
+          offered = this.registry.enabled(mode, ctx).filter(forced);
           if (offered.includes(wanted)) log?.write("unlocked", { tool: wanted.name, group: wanted.group });
         }
       }
       const checked = await this.registry.check(action, offered, ctx);
+      if (this.registry.all.find((t) => t.name === action.tool)?.kind === "write") onlyLooking = false;
       if (!checked.ok) {
         if (checked.policy) stats.refusedCalls++;
         else stats.invalidCalls++;
@@ -545,7 +574,7 @@ export class Agent {
         // Checks from rules, else inferred from project files (detected now, so projects created in this run count).
         const checks = changedInTodo || s.checksPending.value ? (s.rules.verifyCommands.length ? s.rules.verifyCommands : await detectChecks(host)) : [];
         if (checks.length) {
-          const failed = await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f)));
+          const failed = await this.verify(checks, emit, (files) => files.forEach((f) => s.changed.add(f)), ctx.seen);
           // Mid-plan, the build may not pass yet: Greeter takes an IClock (todo 1) before SystemClock
           // implements it (todo 2). When the errors are about what a later todo does, check after that one.
           const later = failed ? laterTodoFor(failed, todos.slice(index + 1)) : undefined;
@@ -601,6 +630,8 @@ export class Agent {
         if (tool.kind === "write") {
           stats.editsApplied++;
           appliedWrites.add(key);
+          writeNow = false;
+          onlyLooking = true;
         }
         lastProgress = step;
         // Agent files (.agent/memory.md) don't need the project's build/tests.
@@ -742,7 +773,7 @@ export class Agent {
    * Runs verify commands from rules; returns failure text, or undefined when all pass.
    * Missing C# using directives are added by code first (`onChange` gets those files).
    */
-  private async verify(commands: string[], emit: (e: AgentEvent) => void, onChange?: (files: string[]) => void): Promise<string | undefined> {
+  private async verify(commands: string[], emit: (e: AgentEvent) => void, onChange?: (files: string[]) => void, seen?: Iterable<string>): Promise<string | undefined> {
     const { host } = this.deps;
     for (const cmd of commands) {
       let r = await host.runCommand(cmd, undefined, { timeoutMs: 300_000 }); // first build may restore packages
@@ -758,7 +789,8 @@ export class Agent {
       const layout = r.exitCode !== 0 && /\bdotnet\b/.test(cmd) ? nestedProjectProblem(await listFiles(host)) : undefined;
       const body = relativizePaths(r.exitCode === 0 ? r.output : failureReport(r.output, host.root, 80), host.root);
       const where = r.exitCode === 0 ? "" : await errorContext(r.output, host.root, (p) => host.readFile(p));
-      const output = `${fixed}$ ${cmd}\nexit code ${r.exitCode}\n${body}${where}${layout ? `\n\nLikely cause: ${layout}` : ""}`;
+      const hints = r.exitCode !== 0 && seen && parseTestFailures(r.output, host.root).length ? await lintHints(seen, (p) => host.readFile(p)) : "";
+      const output = `${fixed}$ ${cmd}\nexit code ${r.exitCode}\n${body}${where}${hints}${layout ? `\n\nLikely cause: ${layout}` : ""}`;
       emit({ type: "verify", ok: r.exitCode === 0, output });
       if (r.exitCode !== 0) return output;
     }

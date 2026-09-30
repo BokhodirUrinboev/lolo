@@ -12,9 +12,12 @@ class Scripted implements LLMProvider {
   readonly model = "scripted";
   readonly profile = resolveProfile("qwen2.5-coder:7b");
   readonly seen: ChatMessage[][] = [];
+  /** The `format` schema of each call: which tools were offered. */
+  readonly schemas: unknown[] = [];
   constructor(private readonly replies: (string | object)[]) {}
   async chat(req: ChatRequest) {
     this.seen.push(req.messages);
+    this.schemas.push(req.schema);
     const next = this.replies.shift() ?? { thought: "out of script", action: { tool: "done", args: { summary: "end" } } };
     const content = typeof next === "string" ? next : JSON.stringify(next);
     // Streamed in chunks like a real endpoint, so guards on partial output can stop it.
@@ -53,6 +56,65 @@ describe("agent loop", () => {
     expect(read("a.txt")).toBe("one\ntwo\n");
     expect(r.status).toBe("failed"); // stuck: nobody to ask in a headless run
     expect(JSON.stringify(provider.seen.at(-1))).toMatch(/already made exactly this change/);
+  });
+
+  it("offers only the writing tools once when the model is stuck only looking", async () => {
+    const { root, read } = workspace({ "src/rate.js": "exports.rate = (a) => a * 100;\n" });
+    const look = act("read_file", { path: "src/rate.js" });
+    const fix = act("rewrite_file", { path: "src/rate.js", content: "exports.rate = (a) => a / 100;\n" });
+    const provider = new Scripted([plan(["Fix the rate in src/rate.js"]), look, act("search", { query: "rate" }), look, look, look, fix, act("done", { summary: "fixed" })]);
+    const r = await run(root, provider, "Fix the rate in src/rate.js");
+    expect(r.status).toBe("done");
+    expect(read("src/rate.js")).toBe("exports.rate = (a) => a / 100;\n");
+    const forcedAt = provider.seen.findIndex((m) => /Stop looking: you have read the code/.test(JSON.stringify(m)));
+    expect(forcedAt).toBeGreaterThan(0);
+    const offered = JSON.stringify(provider.schemas[forcedAt]);
+    expect(offered).toContain("rewrite_file");
+    expect(offered).not.toContain('"read_file"');
+    expect(offered).not.toContain('"done"');
+    // After the write applied, everything is offered again.
+    expect(JSON.stringify(provider.schemas.at(-1))).toContain('"done"');
+  });
+
+  it("treats redoing an applied change as a no-op, not a failed edit", async () => {
+    const { root, read } = workspace({ "src/fee.js": "function fee(order) {\n  return order.total * 0.05;\n}\nmodule.exports = { fee };\n" });
+    const change = act("edit", { path: "src/fee.js", search: "  return order.total * 0.05;", replace: "  return Math.round(order.total * 5) / 100;" });
+    const provider = new Scripted([plan(["Round the fee in src/fee.js to cents", "Use cents for fees in src/fee.js and src/total.js"]), act("read_file", { path: "src/fee.js" }), change, act("done", { summary: "a" }), change, act("done", { summary: "b" })]);
+    const r = await run(root, provider, "Round the fee in src/fee.js to cents");
+    expect(r.status).toBe("done");
+    expect(read("src/fee.js")).toContain("Math.round(order.total * 5) / 100");
+    expect(r.stats).toMatchObject({ editCalls: 1, editsApplied: 1, noopEdits: 1 });
+    expect(JSON.stringify(provider.seen.at(-1))).toMatch(/already contains this change/);
+    expect(JSON.stringify(provider.seen.at(-1))).not.toMatch(/line-based editing/);
+  });
+
+  it("doesn't let the model add tests the user didn't ask for, but lets it update them", async () => {
+    const files = { "src/lib.js": "exports.one = () => 2;\n", "test/lib.test.js": 'const test = require("node:test");\nconst { one } = require("../src/lib");\ntest("one", () => {\n  one();\n});\n' };
+    const addTest = act("edit", { path: "test/lib.test.js", search: "  one();\n});", replace: '  one();\n});\ntest("is one", () => {\n  one();\n});' });
+    const { root } = workspace(files);
+    const provider = new Scripted([plan(["Make one() in src/lib.js return 1"]), act("read_file", { path: "test/lib.test.js" }), addTest, act("done", { summary: "ok" })]);
+    const r = await run(root, provider, "one() in src/lib.js must return 1");
+    expect(JSON.stringify(provider.seen.at(-1))).toMatch(/didn't ask for tests/);
+    expect(r.stats.refusedCalls).toBe(1);
+    // Asked for: allowed.
+    const { root: root2, read } = workspace(files);
+    const provider2 = new Scripted([plan(["Add a test for one() in test/lib.test.js"]), act("read_file", { path: "test/lib.test.js" }), addTest, act("done", { summary: "ok" })]);
+    await run(root2, provider2, "Add a test for one()");
+    expect(read("test/lib.test.js")).toContain('test("is one"');
+  });
+
+  it("treats a change to comments only as a no-op, unless the task is about comments", async () => {
+    const src = "function fee(total) {\n  return total * 0.05;\n}\nmodule.exports = { fee };\n";
+    const note = act("edit", { path: "src/fee.js", search: "  return total * 0.05;", replace: "  return total * 0.05; // matches the expected output" });
+    const { root, read } = workspace({ "src/fee.js": src });
+    const provider = new Scripted([plan(["Fix the fee in src/fee.js"]), act("read_file", { path: "src/fee.js" }), note, act("done", { summary: "ok" })]);
+    const r = await run(root, provider, "The fee in src/fee.js is wrong");
+    expect(read("src/fee.js")).toBe(src);
+    expect(r.stats.noopEdits).toBe(1);
+    expect(JSON.stringify(provider.seen.at(-1))).toMatch(/only touches comments/);
+    const { root: root2, read: read2 } = workspace({ "src/fee.js": src });
+    await run(root2, new Scripted([plan(["Comment the fee formula in src/fee.js"]), act("read_file", { path: "src/fee.js" }), note, act("done", { summary: "ok" })]), "Add a comment to the fee formula");
+    expect(read2("src/fee.js")).toContain("// matches the expected output");
   });
 
   it("reminds the model to act after five reads in a row", async () => {
@@ -145,6 +207,11 @@ describe("agent loop", () => {
     expect(repeatsLine(`{"content":"a\\n${'    .Replace(" ", "-")\\n'.repeat(20)}`)).toBe(true);
     expect(repeatsLine("a\nb\n".repeat(20))).toBe(false);
     expect(repeatsLine("}\n".repeat(30))).toBe(false); // too short to mean anything
+    // A block of lines repeated (a comment, a commented-out line, a blank line).
+    const block = "    # return the item with the lowest price\\n    # return min(items, key=lambda i: i.price)\\n\\n";
+    expect(repeatsLine(`{"search":"def cheapest(items):\\n${block.repeat(7)}`)).toBe(true);
+    expect(repeatsLine(`{"search":"def cheapest(items):\\n${block.repeat(3)}`)).toBe(false);
+    expect(repeatsLine("case 1:\n  return a;\ncase 2:\n  return b;\n".repeat(3))).toBe(false);
     const { root } = workspace({ "a.js": "let a = 1;\n" });
     const loop = JSON.stringify({ thought: "rewrite", action: { tool: "rewrite_file", args: { path: "a.js", content: `let a = 1${'.replace(" ", "-")\n'.repeat(40)}` } } });
     const provider = new Scripted([plan(["Change a.js"]), act("read_file", { path: "a.js" }), loop, act("done", { summary: "ok" })]);
