@@ -31,7 +31,7 @@ export interface Plan {
 
 /** Words that make a message a request for changes, even when phrased as a question ("can you add ...?"). */
 const REQUEST_WORDS =
-  /\b(add|fix|create|make|implement|write|change|update|remove|delete|rename|refactor|move|generate|build|install|set ?up|can you|could you|please|must|should|needs? to|ensure|make sure)\b|qo'?sh|tuzat|yoz(ib|ing)?\b|yarat|o'?zgartir|o'?chir|almashtir|qil(ib|ing|a olasanmi)|iltimos|sozla|добав|исправ|создай|сделай|напиши|измени|удали/i;
+  /\b(add|fix|create|make|implement|write|change|update|remove|delete|rename|refactor|move|generate|build|install|set ?up|can you|could you|please|must|should|needs? to|ensure|make sure)\b|qo'?sh|tuzat|yoz(ib|ing)?\b|yarat|o'?zgartir|o'?chir|almashtir|qil(ib|ing|a olasanmi)|iltimos|sozla|\boch(ib|ish|ing|ing|gin|aymi)?\b|добав|исправ|создай|сделай|напиши|измени|удали|қўш|тузат|ёз(иб|инг)?(?![\p{L}])|ярат|ўзгартир|ўчир|алмаштир|кирит|қил(иб|инг)|илтимос|созла/iu;
 /**
  * Question words. English ones count only at the start ("when"/"which" are common in
  * specs: "throw when the email is invalid"); Uzbek and Russian ones anywhere.
@@ -51,7 +51,9 @@ export function allowedKinds(text: string): MessageKind[] {
   if (!/[\p{L}\p{N}]/u.test(t)) return ["chat"]; // only punctuation/emoji: "???", "!!", "👍"
   if (REMEMBER.test(t)) return ["task"]; // qwen3.5 answered "Understood, I will remember" and saved nothing
   if (REQUEST_WORDS.test(t)) return ["task", "question", "chat"];
-  if (QUESTION_WORDS.test(t)) return ["question"]; // a real question gets a real (read-the-code) answer
+  // A real question gets a real (read-the-code) answer. A long text without "?" is a spec, not a
+  // question: "Qayerda sodir etilganligi" was a column name in a list of Excel headers.
+  if (QUESTION_WORDS.test(t) && (t.includes("?") || t.length <= 200)) return ["question"];
   if (/\?\s*$/.test(t)) return ["question", "chat"]; // "qalaysan?" may just be small talk
   return ["task", "question", "chat"];
 }
@@ -96,7 +98,10 @@ function foldCode(todos: string[]): string[] {
   return out;
 }
 
-const LOOK_ONLY = /^(read|review|identify|locate|find|understand|analy[sz]e|inspect|examine|investigate|look\s+(at|into|for)|search|open|explore|study)\b/i;
+// "open" only for files ("Open src/a.ts"): "Open a Jira issue" is an action.
+const LOOK_ONLY = /^(read|review|identify|determine|locate|find|understand|analy[sz]e|inspect|examine|investigate|look\s+(at|into|for)|search|open\s+(the\s+)?(file\b|\S+\.\w{1,6}\b)|explore|study)\b/i;
+/** "Ask the user whether…": the agent has no way to ask mid-run, the todo only ends the run with a question. */
+const ASK_USER = /^(ask|confirm\s+with|check\s+with|wait\s+for)\b[^.]*\b(user|them|confirmation|approval)\b/i;
 /** A change verb (not the noun: "identify the change that broke it"). */
 const CHANGES = /(?<!\b(the|a|an|this|that|my|your|each|every|specific)\s+)\b(fix|change|update|add|remove|implement|replace|rename|move|create|write|edit|make|set|refactor|convert|delete|extract|use|return|handle)\b/i;
 
@@ -106,7 +111,7 @@ const CHANGES = /(?<!\b(the|a|an|this|that|my|your|each|every|specific)\s+)\b(fi
  * something, and a separate looking todo makes small models redo (or undo) earlier work.
  */
 export function dropLookOnlyTodos(todos: string[], goal: string): string[] {
-  const kept = todos.filter((t) => !LOOK_ONLY.test(t.trim()) || CHANGES.test(t));
+  const kept = todos.filter((t) => (!LOOK_ONLY.test(t.trim()) || CHANGES.test(t)) && !ASK_USER.test(t.trim()));
   return kept.length ? kept : [goal || todos[0]];
 }
 

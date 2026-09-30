@@ -164,6 +164,32 @@ You also need `git` on your PATH (for checkpoints).
 
 Install [Git for Windows](https://git-scm.com/download/win) (checkpoints need git anyway). The agent runs its commands in Git Bash, so the `ls`, `grep`, `&&` and `test -f` that models write work as they would on Linux; the agent's terminal in VS Code is a Git Bash terminal too. When `python3` is only the Microsoft Store placeholder, the agent's commands get a `python3` that runs your installed Python. Without Git Bash, commands run in `cmd.exe` and the model is told so. Set the `LOLO_SHELL` environment variable to use another bash-compatible shell.
 
+## Projects set up for Claude Code
+
+A repository already set up for Claude Code (or Codex and other agents) works as is:
+
+| File | What Agent Lolo does with it |
+|---|---|
+| `CLAUDE.md`, `.claude/CLAUDE.md`, `AGENTS.md`, `CLAUDE.local.md` | Project instructions in every prompt (identical copies once; `@file` imports are inlined) |
+| `.claude/skills/<name>/SKILL.md` (also `.agent/skills`, `~/.claude/skills`) | Listed in the prompt. A skill's full instructions are added when your message asks for it: `/skill-name`, its name, or "… skill" ("jira skill orqali task och"); if the plan leaves it out, its steps come first |
+| `.claude/commands/*.md` | `/` commands, like `.agent/commands` |
+| `.mcp.json` | MCP servers (`disabledMcpjsonServers` is respected) |
+| `.claude/settings.json`, `settings.local.json` | `Bash(...)` rules in `permissions.allow` run without asking (`Bash(*)`: every command), `deny` rules are refused; dangerous commands stay blocked either way |
+| `hooks` in `.claude/settings.json`, `settings.local.json`, `~/.claude/settings.json` | Run as in Claude Code (see below) |
+
+**Hooks.** `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `Stop` hooks run with Claude Code's contract: the event as JSON on stdin (`tool_name`, `tool_input`, `tool_response`, `prompt`, `stop_hook_active`), `CLAUDE_PROJECT_DIR` set, exit 2 blocks with stderr as the reason, JSON output (`decision`, `permissionDecision`, `additionalContext`, `continue`) is understood. Tools carry Claude Code's names (`Bash`, `Read`, `Write`, `Edit`, `Grep`, `LS`, `WebFetch`, `mcp__server__tool`), so matchers like `"Edit|Write"` work unchanged.
+
+| Event | What happens |
+|---|---|
+| `UserPromptSubmit` | Before planning. Output is added to the task; a block cancels the run |
+| `PreToolUse` | A block refuses the call and the model gets the reason; `permissionDecision: "allow"` runs a command without asking |
+| `PostToolUse` | After a successful call; a block (e.g. tests failing after `dotnet build`) goes back to the model to fix |
+| `Stop` | Before the run ends; a block adds a todo with the reason (at most twice) |
+
+Hooks run only in a trusted workspace; turn them off with `localAgent.claudeHooks` (CLI: `--no-hooks`). A hook that can't run on this machine (`powershell` on Linux) is reported once and skipped. `SessionStart`, `Notification` and prompt-type hooks are not run.
+
+Long instruction files take up to 10% of the context window (a 18 KB `CLAUDE.md` fits whole at 64k, and is cut at 32k).
+
 ## Project rules
 
 Put conventions and checks in `.agent/rules.md`; it is always part of the prompt. `verify:` lines run automatically when the agent finishes a change, and failures are fed back for repair:

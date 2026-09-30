@@ -24,6 +24,15 @@ export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
     return undefined;
   },
   async run(a, ctx) {
+    const literal = unexpandedVariables(a.command);
+    if (literal.length) {
+      return fail(
+        `Not run: ${literal.join(", ")} ${literal.length > 1 ? "are" : "is"} inside single quotes, so the shell would send ${literal.length > 1 ? "them" : "it"} literally ` +
+          `(e.g. a JSON body with "$PROJECT_KEY" instead of its value). Put the value outside the single quotes, or better, write the request as a Python script: ` +
+          `python3 - <<'EOF' ... EOF, reading the .env file in the script and building the body with json.dumps.`,
+        `run_command: refused (variables inside single quotes)`,
+      );
+    }
     const moved = await rootRelativePaths(a.command, a.cwd, ctx);
     if (moved) a.cwd = undefined;
     const note = moved ? `(Ran from the workspace root: ${moved} is relative to the root, not to cwd.)\n` : "";
@@ -33,6 +42,38 @@ export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
 };
 
 /**
+ * `$ENV_VAR` / `${ENV_VAR}` / `$(cmd)` inside single quotes of the command line: the shell passes
+ * them on literally. Small models write curl JSON bodies that way and the API gets
+ * `{"key": "$JIRA_PROJECT_KEY"}`. Only upper-case names of 3+ characters count (awk's `$1`/`$NF`,
+ * jq's `$name` are meant literally), heredoc bodies are skipped, and so are commands that hand
+ * the string to another shell (`bash -c '...$(date)'`).
+ */
+export function unexpandedVariables(command: string): string[] {
+  const line = command.includes("<<") ? command.split("\n")[0] : command;
+  if (/\b(ba|z)?sh\s+-c\b|\bssh\b|\bdocker\b|\bkubectl\b|\bxargs\b|-exec\b|\bwatch\b|\benvsubst\b/.test(line)) return [];
+  const found: string[] = [];
+  let quote: string | null = null;
+  let seg = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote === "'") {
+      if (c === "'") {
+        found.push(...[...seg.matchAll(/\$(\{[A-Z][A-Z0-9_]{2,}\}|[A-Z][A-Z0-9_]{2,}|\([^)]*\))/g)].map((m) => m[0]));
+        quote = null;
+      } else seg += c;
+    } else if (quote === '"') {
+      if (c === "\\") i++;
+      else if (c === '"') quote = null;
+    } else if (c === "\\") i++;
+    else if (c === "'" || c === '"') {
+      quote = c;
+      seg = "";
+    }
+  }
+  return [...new Set(found)];
+}
+
+/**
  * Models set `cwd` and then write paths from the workspace root ("cwd: TodoApi" +
  * "dotnet build TodoApi/TodoApi.csproj"); the command fails with "file not found" and
  * the model concludes its fix didn't work. When every path in the command exists from
@@ -40,6 +81,9 @@ export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
  */
 async function rootRelativePaths(command: string, cwd: string | undefined, ctx: ToolContext): Promise<string | undefined> {
   if (!cwd || cwd === ".") return undefined;
+  // "cwd: frontend-v2" + "cd frontend-v2 && npm install": the cd is written from the root.
+  const cd = /^\s*cd\s+("[^"]+"|'[^']+'|[^\s;&|]+)\s*(&&|;)/.exec(command)?.[1]?.replace(/^["']|["']$/g, "");
+  if (cd && !cd.startsWith("/") && !(await ctx.host.stat(`${cwd}/${cd}`)) && (await ctx.host.stat(cd.replace(/^\.\//, ""))) === "dir") return cd;
   const tokens = command.split(/\s+/).map((t) => t.replace(/^["']|["']$/g, "")).filter((t) => /[\\/]/.test(t) && !/^(-|https?:|\/)/.test(t) && !t.includes(".."));
   if (!tokens.length) return undefined;
   let found: string | undefined;
@@ -62,9 +106,9 @@ async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Pr
     }
     return fail(`Not run: ${server}`, `run_command "${a.command}": refused (server)`);
   }
-  const decision = decideCommand(a.command, ctx.commandAllowlist);
+  const decision = decideCommand(a.command, ctx.commandAllowlist, ctx.commandDeny);
   if (decision.kind === "block") return fail(`Command blocked (${decision.reason}). Do not retry it.`, `run_command "${a.command}": blocked`);
-  if (decision.kind === "confirm") {
+  if (decision.kind === "confirm" && !ctx.preApproved) {
     const approval = ctx.host.approveCommand
       ? await ctx.host.approveCommand(a.command, decision.reason)
       : { ok: await ctx.host.confirm(`Run \`${a.command}\`? (${decision.reason})`) };
@@ -88,6 +132,7 @@ async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Pr
   }
   // Generators (dotnet new, npm create) decide the layout; show it so later steps use real paths.
   const created = (await listFiles(ctx.host)).filter((f) => !before.has(f)).sort();
+  if (created.length) created.forEach((f) => (ctx.generated ??= new Set()).add(f));
   const newFiles = created.length ? `\nNew files (${created.length}): ${created.slice(0, 20).join(", ")}${created.length > 20 ? ", ..." : ""}` : "";
   const out =
     fixed +
@@ -107,7 +152,7 @@ async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Pr
 
 const SERVER_COMMANDS: [RegExp, string][] = [
   [/\bdotnet\s+watch\b/, "dotnet build"],
-  [/\bnpm\s+(start|run\s+(dev|serve|start|watch))\b|\b(yarn|pnpm)\s+(dev|start|serve)\b|\b(vite|nodemon|next\s+dev)\b/, "npm run build (or npm test)"],
+  [/\bnpm\s+(start|run\s+(dev|serve|start|watch))\b|\b(yarn|pnpm)\s+(dev|start|serve)\b|(?:^|[;&|(]\s*|\bnpx\s+)(?:vite(?!\s+build)|nodemon|next\s+dev)(?=\s|$)/, "npm run build (or npm test)"],
   [/\b(uvicorn|gunicorn|flask\s+run|manage\.py\s+runserver|rails\s+s(erver)?)\b|\bpython3?\s+-m\s+http\.server\b/, "the tests or a syntax/import check"],
 ];
 

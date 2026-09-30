@@ -25,6 +25,10 @@ export function systemPrompt(opts: {
   mcp?: string;
   /** Facts from .agent/memory.md. */
   memory?: string;
+  /** CLAUDE.md / AGENTS.md and the files they came from. */
+  instructions?: { text: string; sources: string[] };
+  /** "- name (path): summary" lines for the project's skills. */
+  skills?: string;
 }): string {
   const modeRules =
     opts.mode === "ask"
@@ -59,6 +63,12 @@ ${modeRules}
       `External tools (MCP servers). They are offered in the steps where a todo is about them; plan todos that use them (e.g. "Save the note with the notes server") instead of editing files:\n${opts.mcp}`,
     );
   }
+  if (opts.instructions?.text) sections.push(`Project instructions (${opts.instructions.sources.join(", ")}):\n${opts.instructions.text}`);
+  if (opts.skills) {
+    sections.push(
+      `Skills of this project (step-by-step instructions for specific jobs). When a task needs one, read its SKILL.md with read_file first and follow it; commands it shows can be run with run_command:\n${opts.skills}`,
+    );
+  }
   if (opts.rules) sections.push(`Project rules (.agent/rules.md):\n${opts.rules}`);
   if (opts.memory) sections.push(`Remembered from earlier conversations (.agent/memory.md):\n${opts.memory}`);
   if (opts.repoMap) sections.push(`Repository map (files and their main symbols):\n${opts.repoMap}`);
@@ -66,12 +76,16 @@ ${modeRules}
 }
 
 /** Per-run user message: earlier conversation (so follow-ups like "do it" make sense), editor context, then the new message. */
-export function taskMessage(task: string, context: string, conversation = ""): string {
+export function taskMessage(task: string, context: string, conversation = "", skills: string[] = []): string {
   const parts = [];
   if (conversation) parts.push(`Earlier in this conversation (oldest first):\n${conversation}`);
   if (context) parts.push(context);
+  parts.push(...skills);
   const hints = uzbekHints(task);
-  parts.push(`${conversation ? "New message" : "Task"}: ${task}${hints ? `\n${hints}` : ""}`);
+  // Right next to the task, where a small model looks: the skill decides what the todos are.
+  const names = skills.map((s) => /^Skill "([^"]+)"/.exec(s)?.[1]).filter(Boolean);
+  const use = names.length ? `\nUse the skill ${names.map((n) => `"${n}"`).join(", ")} (instructions above): plan the todos by its steps and run its commands.` : "";
+  parts.push(`${conversation ? "New message" : "Task"}: ${task}${hints ? `\n${hints}` : ""}${use}`);
   return parts.join("\n\n");
 }
 

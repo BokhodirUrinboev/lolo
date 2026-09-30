@@ -54,6 +54,11 @@ describe("allowedKinds", async () => {
       "ishni boshla",
       'createUser(name, email) in src/users.js must throw an Error when email is not like x@y.z',
       "Paging.PageCount returns the wrong number of pages when totalItems is not a multiple of pageSize",
+      "Йўналиш номидаги имловий хатони тузатинг",
+      "Excel ҳисобот устунларини ўзгартириш",
+      // A spec whose column names contain question words ("Qayerda sodir etilganligi").
+      "Жиноий хисоботлар Excel форматда юкланганда рўйхат F.I.Sh./ Ish raqami/Qayerda sodir etilganligi/Viloyat/Tuman шаклда тақдим қилинади. " +
+        "Рўйхатни F.I.Sh./ JSHSHIR/ JK moddasi / Ish raqami/Qayerda sodir etilganligi/Viloyat/Tuman шаклига.",
     ]) {
       expect(allowedKinds(t), t).toContain("task");
     }

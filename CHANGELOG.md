@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.0
+
+- **Claude Code hooks.** `UserPromptSubmit`, `PreToolUse`, `PostToolUse` and `Stop` hooks from `.claude/settings.json`, `.claude/settings.local.json` and `~/.claude/settings.json` run with Claude Code's contract (JSON on stdin, exit 2 blocks, `decision`/`permissionDecision`/`additionalContext` output) and tool names (`Bash`, `Edit|Write`, `mcp__…`). A PostToolUse hook that runs the tests after `dotnet build` now reports failures to the model; a Stop hook's block adds a todo. Trusted workspaces only; `localAgent.claudeHooks` / `--no-hooks` turn them off.
+
+## 0.5.5
+
+- `npm install vue@3 vite@5` and `npm create vite@latest` were taken for servers (the word "vite") and run in the background, where they failed with 127 and a finished install counted as a failure. Only `vite`/`npx vite` itself starts a dev server now.
+- Node installed with nvm (or volta, fnm, asdf) is found when VS Code's PATH has no `node`: commands started in the background got "npm: command not found".
+- `cd frontend-v2 && npm install` with `cwd: frontend-v2` runs from the root instead of failing on the second `cd`.
+- Files a command generated in this run (vite's `App.vue`, `main.ts`) can be replaced with `create_file` or `rewrite_file` without reading them first; the model lost steps to "already exists" and "read it first".
+- While writes keep applying, a todo may take up to 3× `maxStepsPerTodo` steps (was 2×): migrating a whole folder needs more than 30.
+
+## 0.5.4
+
+- A long request without "?" is no longer taken for a question because a question word appears in it: "Qayerda sodir etilganligi" was one of the Excel column names in the request, and the agent only read files until it ran out of steps.
+- Uzbek in Cyrillic: request words (ўзгартир, алмаштир, тузат, қўш, кирит, ...) count as a request.
+- Questions: two steps before the limit only `answer` is offered, so a long search ends with an answer from what was read instead of "no result after 15 steps".
+
+## 0.5.3
+
+- Skills that call an API are run as short Python scripts (`python3 - <<'EOF'`): the script reads `.env`, builds JSON with `json.dumps` and fails on HTTP errors. With curl, a 9B model put `$JIRA_PROJECT_KEY` inside single quotes (sent literally) and read exit code 0 of a failed request as success.
+- `run_command` refuses variables and `$(...)` inside single quotes, which the shell would send literally, and says how to fix it.
+- `read_file` of `.env` shows the variable names only; the values (tokens) no longer reach the model or the run logs.
+- Chat: a tool row whose command contains `: ` (e.g. `-H "Authorization: Bearer …"`) showed a piece of the command instead of its result.
+
+## 0.5.2
+
+- **Claude Code setups work as is.** `CLAUDE.md` / `AGENTS.md` (with `@file` imports) are project instructions in every prompt; skills in `.claude/skills` (and `.agent/skills`, `~/.claude/skills`) are listed, and a skill's instructions are added when the message asks for it (`/skill-name`, its name, "… skill"); `.claude/commands` are slash commands; `.mcp.json` servers are started; `Bash(...)` permissions from `.claude/settings.json` extend the command allowlist (`deny` rules are refused). Before, "create a Jira task with the jira skill" got "I have no Jira tool".
+- A skill the user asked for but the plan ignores becomes the first todo (qwen2.5-coder planned only the bug fix), and the task line names the skill to use.
+- Uzbek: "och" (open, e.g. a task) and "orqali" (via) get English hints, and "och" counts as a request.
+- A skill the user asked for counts as confirmed: its "ask before doing it" step is skipped (the model ended every run with "Jira ochaymi?"), and plan todos that only ask the user are dropped.
+- Plans: "Open a Jira issue" is no longer dropped as a look-only todo ("open" counts as looking only for files).
+- A short follow-up ("och", "open it") keeps the skill of the request before it; without it the model looked for a `jira-task-tracker` dotnet tool.
+
 ## 0.5.0
 
 Stage 14 of the plan: Windows, a much larger evaluation, and the agent fixes it found.

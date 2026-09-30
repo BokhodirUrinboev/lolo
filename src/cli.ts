@@ -32,6 +32,7 @@ const { values, positionals } = parseArgs({
     "tool-mode": { type: "string" },
     "api-key": { type: "string", default: "" },
     "max-steps": { type: "string", default: "15" },
+    "no-hooks": { type: "boolean", default: false },
     "embed-model": { type: "string" },
     web: { type: "string" },
     "searxng-url": { type: "string" },
@@ -98,7 +99,7 @@ function main() {
   process.on("SIGINT", () => abort.abort());
 
   const mcp = mcpHub(values.root!);
-  const agent = new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent: print, maxStepsPerTodo: Number(values["max-steps"]), embeddingModel: values["embed-model"], web: webConfig(), mcp });
+  const agent = new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent: print, maxStepsPerTodo: Number(values["max-steps"]), claudeHooks: !values["no-hooks"], embeddingModel: values["embed-model"], web: webConfig(), mcp });
   agent.run(task, values.mode as AgentMode, abort.signal).then(async (r) => {
     rl?.close();
     await mcp?.close();
@@ -117,7 +118,7 @@ async function chat() {
   const host = new NodeHost(values.root!, { autoApprove: true, interactive: false, confirm: async () => !!values.yes });
   const mcp = mcpHub(values.root!);
   const agent = (onEvent: (e: AgentEvent) => void) =>
-    new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent, maxStepsPerTodo: Number(values["max-steps"]), embeddingModel: values["embed-model"], web: webConfig(), mcp });
+    new Agent({ host, provider: makeProvider(), commandAllowlist: DEFAULT_ALLOWLIST, onEvent, maxStepsPerTodo: Number(values["max-steps"]), claudeHooks: !values["no-hooks"], embeddingModel: values["embed-model"], web: webConfig(), mcp });
   let turns: Turn[] = [];
   const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: !!process.stdin.isTTY });
   const prompt = () => process.stdin.isTTY && process.stderr.write(`${c.cyan}> ${c.reset}`);

@@ -16,9 +16,14 @@ const BLOCKED: [RegExp, string][] = [
  * Decides whether run_command may execute `command`. Blocked patterns are never
  * run; chained commands are allowed only if every part matches the allowlist.
  */
-export function decideCommand(command: string, allowlist: string[]): CommandDecision {
+export function decideCommand(command: string, allowlist: string[], deny: string[] = []): CommandDecision {
   const cmd = command.trim();
   for (const [re, why] of BLOCKED) if (re.test(cmd)) return { kind: "block", reason: why };
+  const parts0 = cmd.split(/\s*(?:&&|\|\||;|\|)\s*/).filter(Boolean);
+  const denied = parts0.find((p) => deny.some((d) => d === "*" || p === d || p.startsWith(d + " ")));
+  if (denied) return { kind: "block", reason: `denied by the project's permissions (.claude/settings.json)` };
+  // "*" (Claude Code's Bash(*)): every command that isn't blocked runs without asking.
+  if (allowlist.includes("*")) return { kind: "allow" };
   if (/[`]|\$\(|>\s*[^&\s]|<\(/.test(cmd)) return { kind: "confirm", reason: "uses substitution or redirection" };
   const parts = cmd.split(/\s*(?:&&|\|\||;|\|)\s*/).filter(Boolean);
   const allowed = (p: string) => allowlist.some((a) => p === a || p.startsWith(a + " "));

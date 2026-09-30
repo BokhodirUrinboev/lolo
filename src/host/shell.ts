@@ -1,5 +1,5 @@
 import { ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -65,7 +65,56 @@ export function commandEnv(extra: Record<string, string> = {}): NodeJS.ProcessEn
     const key = pathKey(env);
     env[key] = shims + path.delimiter + (env[key] ?? "");
   }
+  const node = nodeBin(env[pathKey(env)] ?? "");
+  if (node) {
+    const key = pathKey(env);
+    env[key] = (env[key] ?? "") + path.delimiter + node;
+  }
   return env;
+}
+
+/**
+ * Node installed with nvm (or volta, fnm, asdf) is on PATH only in interactive shells:
+ * VS Code started from the desktop, and so every command the agent spawns, got
+ * "npm: command not found". Returns the folder with `node` when PATH has none.
+ */
+export function nodeBin(pathValue: string, home = os.homedir()): string | undefined {
+  if (process.platform === "win32") return undefined; // nvm-windows and the installer set the system PATH
+  if (pathValue.split(path.delimiter).some((d) => d && existsSync(path.join(d, "node")))) return undefined;
+  const nvm = process.env.NVM_DIR || path.join(home, ".nvm");
+  const versions = path.join(nvm, "versions", "node");
+  let installed: string[] = [];
+  try {
+    installed = readdirSync(versions).filter((v) => /^v\d+/.test(v)).sort((a, b) => compareVersions(b, a));
+  } catch {
+    /* no nvm */
+  }
+  if (installed.length) {
+    let alias = "";
+    try {
+      alias = readFileSync(path.join(nvm, "alias", "default"), "utf8").trim().replace(/^v/, "");
+    } catch {
+      /* no default alias */
+    }
+    const chosen = installed.find((v) => alias && (v.slice(1) === alias || v.slice(1).startsWith(alias + "."))) ?? installed[0];
+    return path.join(versions, chosen, "bin");
+  }
+  const others = [
+    path.join(home, ".volta", "bin"),
+    path.join(home, ".local", "share", "fnm", "aliases", "default", "bin"),
+    path.join(home, ".fnm", "aliases", "default", "bin"),
+    path.join(home, ".asdf", "shims"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+  return others.find((d) => existsSync(path.join(d, "node")));
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.slice(1).split(".").map(Number);
+  const pb = b.slice(1).split(".").map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  return 0;
 }
 
 let shimDir: string | null | undefined;

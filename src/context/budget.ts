@@ -6,7 +6,8 @@ export function estimateTokens(text: string): number {
 }
 
 /** Share of the context window per prompt section. */
-export const QUOTAS = { rules: 0.05, map: 0.12, files: 0.45, history: 0.25, output: 0.13 } as const;
+/** `instructions` (CLAUDE.md/AGENTS.md) comes on top: the history budget shrinks by whatever the prefix really uses. */
+export const QUOTAS = { rules: 0.05, instructions: 0.1, map: 0.12, files: 0.45, history: 0.25, output: 0.13 } as const;
 export type Section = keyof typeof QUOTAS;
 
 export class Budget {
