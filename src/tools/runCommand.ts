@@ -1,10 +1,11 @@
 import { nestedProjectProblem } from "../context/projectChecks";
 import { listFiles } from "../context/repoMap";
 import { decideCommand } from "./commandPolicy";
-import { truncateOutput } from "./output";
+import { missingUsings } from "./missingImports";
+import { relativizePaths, truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
 import { startProcess } from "./processes";
-import { failureReport } from "./testReport";
+import { errorContext, failureReport } from "./testReport";
 import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
 
 export const runCommand: ToolDef<{ command: string; cwd?: string }> = {
@@ -73,11 +74,25 @@ async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Pr
     }
   }
   const before = new Set(await listFiles(ctx.host));
-  const r = await ctx.host.runCommand(a.command, ctx.signal, { cwd: a.cwd });
+  let r = await ctx.host.runCommand(a.command, ctx.signal, { cwd: a.cwd });
+  // A C# build that only lacks well-known using directives: add them by code and run again.
+  let fixed = "";
+  const changed: string[] = [];
+  if (r.exitCode !== 0) {
+    const fix = await missingUsings(r.output, ctx.host.root, (p) => ctx.host.readFile(p));
+    if (fix.changes.length && (await ctx.host.proposeWrites(fix.changes, "add missing using directives")).applied) {
+      fixed = `${fix.note} Output after that fix:\n`;
+      changed.push(...fix.changes.map((c) => c.path));
+      r = await ctx.host.runCommand(a.command, ctx.signal, { cwd: a.cwd });
+    }
+  }
   // Generators (dotnet new, npm create) decide the layout; show it so later steps use real paths.
   const created = (await listFiles(ctx.host)).filter((f) => !before.has(f)).sort();
   const newFiles = created.length ? `\nNew files (${created.length}): ${created.slice(0, 20).join(", ")}${created.length > 20 ? ", ..." : ""}` : "";
-  const out = r.exitCode === 0 ? truncateOutput(r.output) : failureReport(r.output, ctx.host.root);
+  const out =
+    fixed +
+    relativizePaths(r.exitCode === 0 ? truncateOutput(r.output) : failureReport(r.output, ctx.host.root), ctx.host.root) +
+    (r.exitCode === 0 ? "" : await errorContext(r.output, ctx.host.root, (p) => ctx.host.readFile(p)));
   const where = a.cwd && a.cwd !== "." ? ` (in ${a.cwd})` : "";
   const timeout = r.timedOut
     ? "\n[Timed out after 2 minutes and was stopped. Servers and watchers never finish; check your work with a build or tests instead.]"
@@ -86,23 +101,36 @@ async function runIn(a: { command: string; cwd?: string }, ctx: ToolContext): Pr
   const layout =
     (created.some((f) => /\.(cs|fs|vb)proj$/.test(f)) || (r.exitCode !== 0 && /\bdotnet\b/.test(a.command))) && nestedProjectProblem([...before, ...created]);
   const text = `$ ${a.command}${where}\nexit code ${r.exitCode}\n${out}${timeout}${newFiles}${layout ? `\n\nWarning: ${layout}` : ""}`;
-  const summary = `run_command "${a.command}"${where}: ${r.timedOut ? "timed out" : `exit ${r.exitCode}`}`;
-  return r.exitCode === 0 ? ok(text, summary) : { ok: false, output: text, summary };
+  const summary = `run_command "${a.command}"${where}: ${r.timedOut ? "timed out" : `exit ${r.exitCode}`}${fixed ? " (after adding using directives)" : ""}`;
+  return r.exitCode === 0 ? ok(text, summary, changed.length ? changed : undefined) : { ok: false, output: text, summary, changed: changed.length ? changed : undefined };
 }
 
 const SERVER_COMMANDS: [RegExp, string][] = [
   [/\bdotnet\s+watch\b/, "dotnet build"],
   [/\bnpm\s+(start|run\s+(dev|serve|start|watch))\b|\b(yarn|pnpm)\s+(dev|start|serve)\b|\b(vite|nodemon|next\s+dev)\b/, "npm run build (or npm test)"],
-  [/\b(uvicorn|gunicorn|flask\s+run|manage\.py\s+runserver|rails\s+s(erver)?)\b/, "the tests or a syntax/import check"],
+  [/\b(uvicorn|gunicorn|flask\s+run|manage\.py\s+runserver|rails\s+s(erver)?)\b|\bpython3?\s+-m\s+http\.server\b/, "the tests or a syntax/import check"],
 ];
+
+/** A script run directly (`node server.js`, `python app.py`, `go run .`). */
+const SCRIPT = /^\s*(?:node|python3?|py|go\s+run)\s+(?:-[\w-]+\s+)*("[^"]+"|[\w./\\-]+)/;
+/** Code that listens for connections: running such a file starts a server. */
+const SERVER_CODE = /\.listen\(|\bapp\.run\(|\buvicorn\.run\(|\bserve_forever\(|\brun_simple\(|\bweb\.run_app\(|\bListenAndServe(TLS)?\(/;
 
 /**
  * Commands that start a server or watcher never exit, so they only burn the
- * timeout. `dotnet run` is refused only for web projects (console apps are fine).
+ * timeout. `dotnet run` is refused only for web projects (console apps are fine);
+ * a script counts when its file contains server code.
  */
 async function serverReason(command: string, cwd: string, ctx: ToolContext): Promise<string | undefined> {
   for (const [re, instead] of SERVER_COMMANDS) {
     if (re.test(command)) return `\`${command}\` starts a server/watcher that never exits. Check your work with ${instead} instead.`;
+  }
+  const script = SCRIPT.exec(command)?.[1]?.replace(/"/g, "");
+  if (script) {
+    const rel = resolveWorkspacePath(ctx.host.root, `${cwd}/${script}`);
+    const file = "error" in rel ? undefined : (await ctx.host.stat(rel.path)) === "dir" ? `${rel.path}/main.go` : rel.path;
+    const code = file ? await ctx.host.readFile(file).catch(() => "") : "";
+    if (SERVER_CODE.test(code)) return `\`${command}\` starts a server that never exits. Check your work with the tests instead.`;
   }
   if (!/\bdotnet\s+run\b/.test(command)) return undefined;
   const project = /--project\s+("[^"]+"|\S+)/.exec(command)?.[1]?.replace(/"/g, "");

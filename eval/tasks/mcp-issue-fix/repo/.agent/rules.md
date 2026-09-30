@@ -1,0 +1,1 @@
+- verify: node --test

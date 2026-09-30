@@ -1,9 +1,11 @@
 import { listFiles } from "../context/repoMap";
 import { fileSymbols, languageFor } from "../context/treeSitter";
-import { applyLineRange, editToolFor, EditTool, mergeLazyRewrite } from "../edit/formats";
-import { fuzzyApply } from "../edit/fuzzyApply";
-import { checkEditSyntax } from "../edit/syntaxGuard";
+import { restoreCopiedEscapes } from "../edit/escapes";
+import { applyLineRange, editToolFor, EditTool, isLazyPlaceholder, isStub, mergeLazyRewrite } from "../edit/formats";
+import { fuzzyApply, overlapCandidates, reindent } from "../edit/fuzzyApply";
+import { checkEditSyntax, findImbalance, syntaxRepairs } from "../edit/syntaxGuard";
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
+import { moduleSystemMismatch, moduleSystemProblem, toCommonJs, undefinedExports } from "./moduleSystem";
 import { IGNORED_DIRS } from "./paths";
 import { symbolSummary } from "./output";
 import { fail, ok, ToolContext, ToolDef, ToolResult } from "./types";
@@ -207,9 +209,132 @@ export const listDir: ToolDef<{ path?: string }> = {
   },
 };
 
+/**
+ * Line breaks the model escaped twice in its JSON (`"pop() {\\n    return x;\\n}"`): the text
+ * then holds `\n` as two characters and nothing matches or parses. Only for text without a
+ * real line break and several `\n` before indentation or a bracket (not a `"\n"` in a string).
+ */
+export function doubleEscaped(s: string): boolean {
+  return !s.includes("\n") && (s.match(/\\n(?=[ \t}\])]|\\n|$)/g) ?? []).length >= 2;
+}
+
+const unescapeBreaks = (s: string) => s.replace(/\\r\\n|\\n/g, "\n").replace(/\\t/g, "\t");
+const escaped = new WeakSet<object>();
+
+/** `content` escaped twice: fixed in place (checks run before run()). */
+function fixEscapes(a: { content: string }) {
+  if (!doubleEscaped(a.content)) return;
+  a.content = unescapeBreaks(a.content);
+  escaped.add(a);
+}
+
+const converted = new WeakSet<object>();
+const escapeNote = (a: object) => (escaped.has(a) ? ESCAPE_NOTE : "") + (converted.has(a) ? CONVERTED_NOTE : "");
+const ESCAPE_NOTE = " (your line breaks were escaped twice as \\\\n; they were turned into real line breaks)";
+const CONVERTED_NOTE = " (this project uses CommonJS, so export/import were turned into module.exports/require; use require to load it)";
+
+/**
+ * The module-system check for a whole file (create_file, rewrite_file): export/import in a CommonJS
+ * project is converted by code when the file uses only plain forms, instead of refused.
+ */
+async function wholeFileModules(a: { path: string; content: string }, before: string, ctx: ToolContext): Promise<string | undefined> {
+  const mismatch = await moduleSystemMismatch(a.path, a.content, before, ctx);
+  if (!mismatch) return undefined;
+  const cjs = mismatch.wants === "commonjs" ? toCommonJs(a.content) : undefined;
+  if (!cjs) return mismatch.advice;
+  a.content = cjs;
+  converted.add(a);
+  return undefined;
+}
+
+/**
+ * A `// existing implementation` / `// ... rest of the code` line that `before` doesn't have:
+ * in new code it is a hole, not code (a moved function written as a stub). Error text, or undefined.
+ */
+function placeholderIn(text: string, before: string, path: string, todo?: string): string | undefined {
+  if (!languageFor(path) && !BRACE_FILE.test(path)) return undefined;
+  const known = new Set(toLf(before).split("\n").map((l) => l.trim()));
+  const hole = toLf(text).split("\n").find((l) => isLazyPlaceholder(l, known));
+  return hole ? holeError(hole, before) : stubIn(text, before, path, todo);
+}
+
+const WANTS_STUBS = /\b(?:[Ss]tubs?|[Ss]keletons?|[Ss]caffold\w*|[Pp]laceholders?)\b|\bTODOs?\b/;
+
+/**
+ * A body left out of new code (`{ ... }`, `// validation logic here` right after `{`): models write
+ * the new file of a move or split before reading the code they move. Error text, or undefined.
+ * "Existing code" placeholders are left to mergeLazyRewrite; a todo asking for stubs gets them.
+ */
+function stubIn(text: string, before: string, path: string, todo?: string): string | undefined {
+  if ((!languageFor(path) && !BRACE_FILE.test(path)) || WANTS_STUBS.test(todo ?? "")) return undefined;
+  const known = new Set(toLf(before).split("\n").map((l) => l.trim()));
+  const lines = toLf(text).split("\n");
+  const previous = (i: number) => lines.slice(0, i).reverse().find((p) => p.trim());
+  const stub = lines.find((l, i) => !isLazyPlaceholder(l, known) && isStub(l, previous(i), known));
+  return stub ? holeError(stub, before) : undefined;
+}
+
+const holeError = (line: string, before: string) =>
+  `\`${line.trim()}\` is a placeholder, not code. Write the real code${before ? "" : " (read the file the code comes from, and copy it)"}; nothing may be left out.`;
+
+/** A whole-file write to a path that doesn't exist (and isn't a misplaced existing file) creates it. */
+async function createsFile(path: string, ctx: ToolContext): Promise<boolean> {
+  return (await ctx.host.stat(path)) === null && !(await sameName(path, ctx)).length;
+}
+
+interface Def {
+  name: string;
+  line: number;
+  endLine: number;
+}
+
+/** The innermost function/class around each line (tree-sitter); undefined outside any, or without a grammar. */
+async function enclosingDefs(path: string, text: string, lines: number[]): Promise<(Def | undefined)[]> {
+  const defs = (await fileSymbols(path, text))?.defs ?? [];
+  return lines.map((l) => defs.filter((d) => d.line <= l && d.endLine >= l).sort((x, y) => x.endLine - x.line - (y.endLine - y.line))[0]);
+}
+
+/**
+ * `search` is the first line(s) of a function or class and `replace` a complete new version of
+ * it (balanced brackets, same name): the model means to replace the whole definition. Applied
+ * literally, the old body would stay behind as a dead `{ ... }` block, which still parses in JS.
+ * Returns the file with the whole definition replaced, when that parses; brace languages only.
+ */
+async function redefinition(path: string, original: string, search: string, replace: string, startLine: number) {
+  if (!BRACE_FILE.test(path)) return undefined;
+  const lines = toLf(original).split("\n");
+  const def = ((await fileSymbols(path, original))?.defs ?? []).find((d) => d.line === startLine && d.endLine > d.line);
+  const s = toLf(search).replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "");
+  const r = toLf(replace).replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "");
+  if (!def || s.split("\n").length >= def.endLine - def.line + 1) return undefined; // search already spans it
+  const rLines = r.split("\n");
+  const nameRe = new RegExp(`(?<![\\w$])${def.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`);
+  if (!nameRe.test(rLines[0]) || !r.includes("{") || findImbalance(r)) return undefined;
+  const body = reindent(r, [rLines[0]], [lines[def.line - 1]]);
+  const content = fromLf([...lines.slice(0, def.line - 1), ...body, ...lines.slice(def.endLine)].join("\n"), detectEol(original));
+  if (await checkEditSyntax(path, original, content)) return undefined;
+  return { content, name: def.name, from: def.line, to: def.endLine };
+}
+
+const BRACE_FILE = /\.(ts|tsx|js|jsx|mjs|cjs|cs|java|kt|go|rs|c|h|cpp|hpp|cc|swift|php|dart|scala)$/i;
+
 /** `fragment`: the text the model wrote for this edit (to spot a reply cut off by an unescaped quote). */
+/** Lines of `before` and of the files the model read in this run: the code it may be copying. */
+async function knownLines(ctx: ToolContext, before?: string): Promise<string[]> {
+  const texts = before !== undefined ? [before] : [];
+  for (const f of [...(ctx.seen ?? [])].slice(0, 30)) texts.push(await ctx.host.readFile(f).catch(() => ""));
+  return texts.flatMap((t) => toLf(t).split("\n"));
+}
+
+const ESCAPES_RESTORED = " (regex escapes such as \\s that came out as line breaks were restored from the code you read; in JSON write them as \\\\s)";
+
 async function write(ctx: ToolContext, path: string, content: string, isNew: boolean, reason: string, note = "", fragment = content): Promise<ToolResult> {
   const before = isNew ? undefined : await ctx.host.readFile(path);
+  const restored = restoreCopiedEscapes(content, await knownLines(ctx, before));
+  if (restored.fixed) {
+    content = restored.text;
+    note += ESCAPES_RESTORED;
+  }
   if (before !== undefined) content = matchFileEnding(before, content);
   if (content === before) {
     return {
@@ -219,10 +344,21 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
   }
   const pkg = before !== undefined ? handAddedPackage(path, before, content) : undefined;
   if (pkg) return fail(pkg, `${reason}: rejected (package added by hand)`);
+  const missing = undefinedExports(path, content).filter((n) => !undefinedExports(path, before ?? "").includes(n));
+  if (missing.length) {
+    const what = missing.map((n) => `\`${n}\``).join(", ");
+    return fail(`${path} would export ${what} without defining ${missing.length > 1 ? "them" : "it"}. Write the complete file: the code of ${what} (copied from where it was) and the export. The file was NOT changed.`, `${reason}: rejected (exports an undefined name)`);
+  }
   const broken = await checkEditSyntax(path, before, content, fragment);
   if (broken) {
-    ctx.edits.recordFailure(path);
-    return fail(broken, `${reason}: rejected (syntax error)`);
+    let repaired: { text: string; note: string } | undefined;
+    for (const r of syntaxRepairs(path, content)) if (!(await checkEditSyntax(path, before, r.text))) (repaired ??= r);
+    if (!repaired) {
+      ctx.edits.recordFailure(path);
+      return fail(broken, `${reason}: rejected (syntax error)`);
+    }
+    content = repaired.text;
+    note += ` (${repaired.note})`;
   }
   const outcome = await ctx.host.proposeWrite(path, content, { isNew, reason });
   if (!outcome.applied) {
@@ -247,13 +383,74 @@ export const editFile: ToolDef<{ path: string; search: string; replace: string; 
     properties: { path: { type: "string" }, search: { type: "string", minLength: 1 }, replace: { type: "string" }, all: { type: "boolean" } },
     required: ["path", "search", "replace"],
   },
-  check: (a, ctx) => mustBeFile(a.path, ctx),
+  async check(a, ctx) {
+    const missing = await mustBeFile(a.path, ctx);
+    if (missing) return missing;
+    const before = await ctx.host.readFile(a.path);
+    return placeholderIn(a.replace, before, a.path, ctx.todo) ?? moduleSystemProblem(a.path, a.replace, before, ctx);
+  },
   async run(a, ctx) {
     const original = await ctx.host.readFile(a.path);
-    const r = fuzzyApply(original, a.search, a.replace, { all: a.all });
+    a.search = restoreCopiedEscapes(a.search, toLf(original).split("\n")).text;
+    let r = fuzzyApply(original, a.search, a.replace, { all: a.all });
+    let where = "";
+    // `search` with `\n` typed as text: when its unescaped form is in the file, the model escaped twice.
+    if (!r.ok && !r.matches && !a.search.includes("\n") && a.search.includes("\\n")) {
+      const search = unescapeBreaks(a.search);
+      const replace = a.replace.includes("\n") ? a.replace : unescapeBreaks(a.replace);
+      const retry = fuzzyApply(original, search, replace, { all: a.all });
+      if (retry.ok || retry.matches) {
+        Object.assign(a, { search, replace });
+        r = retry;
+        where = ESCAPE_NOTE;
+      }
+    }
+    // Several matches: the ones inside the function the todo (or the model's thought) names are meant.
+    const context = `${ctx.todo ?? ""}\n${ctx.thought ?? ""}`;
+    const named = (d: Def | undefined) => !!d && new RegExp(`(?<![\\w$])${d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`).test(context);
+    if (!r.ok && r.matches) {
+      const matches = r.matches;
+      const owners = await enclosingDefs(a.path, original, matches);
+      const inNamed = matches.filter((_, i) => named(owners[i]));
+      const picked = inNamed.length === 1 ? fuzzyApply(original, a.search, a.replace, { at: inNamed[0] }) : undefined;
+      if (picked?.ok) {
+        where = ` (\`search\` matched ${matches.length} places; changed the one in ${owners[matches.indexOf(inNamed[0])]!.name} at line ${inNamed[0]})`;
+        r = picked;
+      } else {
+        const places = matches.map((l, i) => `line ${l}${owners[i] ? ` (in ${owners[i]!.name})` : ""}`).join(", ");
+        r = { ...r, reason: `\`search\` matches ${matches.length} places: ${places}. Include the line above or below it (e.g. the function's first line) so it matches only one.` };
+      }
+    } else if (r.ok && a.all && (r.replaced?.length ?? 0) > 1) {
+      // all=true across functions while the todo is about one of them: only that one (the others were collateral).
+      const owners = await enclosingDefs(a.path, original, r.replaced!);
+      const targets = [...new Set(owners.filter(named))];
+      if (targets.length === 1 && owners.some((o) => o !== targets[0])) {
+        const limited = fuzzyApply(original, a.search, a.replace, { all: true, within: [targets[0]!.line, targets[0]!.endLine] });
+        if (limited.ok && limited.replaced?.length) {
+          where = ` (only in ${targets[0]!.name}, which the task is about: ${limited.replaced.length} of ${r.replaced!.length} occurrences)`;
+          r = limited;
+        }
+      }
+    }
     if (r.ok) {
-      const note = r.strategy === "exact" ? "" : ` (matched ${r.strategy} at line ${r.startLine}, score ${r.score})`;
-      return write(ctx, a.path, r.content, false, `edit ${a.path}`, note, a.replace);
+      let note = where || (r.strategy === "exact" ? "" : ` (matched ${r.strategy} at line ${r.startLine}, score ${r.score})`);
+      let content = r.content;
+      const whole = a.all ? undefined : await redefinition(a.path, original, a.search, a.replace, r.startLine);
+      if (whole) {
+        content = whole.content;
+        note += ` (\`replace\` is a complete new ${whole.name}, so it replaced the whole old one, lines ${whole.from}-${whole.to})`;
+      }
+      // `replace` repeating the lines around `search` (a second closing brace): replace them instead, if that parses.
+      if (!whole && !a.all && (await checkEditSyntax(a.path, original, content, a.replace))) {
+        const searchLines = toLf(a.search).replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "").split("\n").length;
+        for (const c of overlapCandidates(original, content, r.startLine, searchLines)) {
+          if (await checkEditSyntax(a.path, original, c)) continue;
+          content = c;
+          note += " (your `replace` repeated lines next to `search`; they were replaced, not duplicated)";
+          break;
+        }
+      }
+      return write(ctx, a.path, content, false, `edit ${a.path}`, note, a.replace);
     }
     const switched = ctx.edits.recordFailure(a.path);
     let out = `Edit failed: ${r.reason}`;
@@ -275,14 +472,21 @@ export const rewriteFile: ToolDef<{ path: string; content: string }> = {
   description: "Replace the entire content of an existing small file. Write the complete file: never use placeholders like `// ... existing code ...`.",
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
-    return (await mustBeFile(a.path, ctx)) ?? mustUse("rewrite_file", a.path, ctx);
+    fixEscapes(a);
+    // Models "rewrite" the new file of a move or split: the complete content of a missing file creates it.
+    if (await createsFile(a.path, ctx)) return createFile.check!(a, ctx);
+    const refused = (await mustBeFile(a.path, ctx)) ?? (await mustUse("rewrite_file", a.path, ctx));
+    if (refused) return refused;
+    const before = await ctx.host.readFile(a.path);
+    return stubIn(a.content, before, a.path, ctx.todo) ?? wholeFileModules(a, before, ctx);
   },
   async run(a, ctx) {
+    if ((await ctx.host.stat(a.path)) === null) return createFile.run(a, ctx);
     const original = await ctx.host.readFile(a.path);
     const merged = mergeLazyRewrite(original, a.content);
     if (!merged.ok) return fail(merged.reason, `rewrite_file ${a.path}: placeholders could not be merged`);
     const note = merged.filled ? ` (${merged.filled} "existing code" placeholder(s) were filled from the original)` : "";
-    return write(ctx, a.path, merged.content, false, `rewrite_file ${a.path}`, note);
+    return write(ctx, a.path, merged.content, false, `rewrite_file ${a.path}`, note + escapeNote(a));
   },
 };
 
@@ -301,12 +505,16 @@ export const editLines: ToolDef<{ path: string; start_line: number; end_line: nu
     required: ["path", "start_line", "end_line", "content"],
   },
   async check(a, ctx) {
-    return (await mustBeFile(a.path, ctx)) ?? mustUse("edit_lines", a.path, ctx);
+    fixEscapes(a);
+    if (a.start_line === 1 && a.end_line === 0 && (await createsFile(a.path, ctx))) return createFile.check!(a, ctx);
+    const refused = (await mustBeFile(a.path, ctx)) ?? (await mustUse("edit_lines", a.path, ctx));
+    return refused ?? moduleSystemProblem(a.path, a.content, await ctx.host.readFile(a.path), ctx);
   },
   async run(a, ctx) {
+    if ((await ctx.host.stat(a.path)) === null) return createFile.run(a, ctx);
     const r = applyLineRange(await ctx.host.readFile(a.path), a.start_line, a.end_line, a.content);
     if (!r.ok) return fail(`edit_lines failed: ${r.reason}`);
-    return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${a.start_line}-${a.end_line}`, "", a.content);
+    return write(ctx, a.path, r.content, false, `edit_lines ${a.path}:${a.start_line}-${a.end_line}`, escapeNote(a), a.content);
   },
 };
 
@@ -316,6 +524,7 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
   description: "Create a new file (parent folders are created). Fails if the file exists.",
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
+    fixEscapes(a);
     if (await ctx.host.stat(a.path)) return `"${a.path}" already exists. Use edit to change it.`;
     const base = a.path.split("/").pop()!;
     if (/^\.(slnx?|csproj|fsproj|cs|py|js|ts|tsx|json|go|rs|java)$/.test(base)) {
@@ -327,7 +536,7 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
     if (!a.content.trim() && !/(^|\/)(__init__\.py|\.gitkeep|\.keep|py\.typed)$/.test(a.path)) {
       return `content is empty. Create ${a.path} with its complete content in this call.`;
     }
-    return undefined;
+    return placeholderIn(a.content, "", a.path, ctx.todo) ?? wholeFileModules(a, "", ctx);
   },
-  run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`),
+  run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`, escapeNote(a)),
 };

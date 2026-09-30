@@ -1,0 +1,5 @@
+{
+  "task": "Add a GET /health endpoint to server.js that responds with the JSON {\"status\":\"ok\"} (Content-Type application/json). Then start the server and check the endpoint with curl.",
+  "check": "node --test",
+  "approve": true
+}

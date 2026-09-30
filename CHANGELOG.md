@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.5.0
+
+Stage 14 of the plan: Windows, a much larger evaluation, and the agent fixes it found.
+
+**Windows.** Tested on Windows 11 (unit tests, the VS Code smoke test and the evaluation); CI now runs the tests and the smoke test on Linux, Windows and macOS.
+
+- Commands run in Git Bash (installed with Git), so the `ls`, `grep`, `&&` and `test -f` that models write work; the agent's VS Code terminal is Git Bash too. Without Git Bash, cmd.exe, and the prompt says so.
+- `python3` works when Windows only has the Microsoft Store placeholder for it.
+- Background servers (`npm run dev`) are really stopped at the end of a task, and commands that time out are stopped with everything they started.
+- Search results and build errors show workspace-relative paths with `/`.
+
+**Fewer failed tasks with small models.** Each fix comes from a failing run of qwen2.5-coder:7b and is done by code:
+
+- Edits: an ambiguous `search` uses the match in the function the task names (and `all=true` stays inside it); a `replace` that repeats the lines around `search`, or is a complete new version of the function, replaces instead of duplicating; line breaks escaped twice are repaired; placeholders like `// existing implementation` and bodies left out (`{ ... }`, `// validation logic here`) are refused unless the todo asks for stubs; an edit already in place is not applied again; `rewrite_file` of a file that doesn't exist yet creates it. A file must be read before it is edited, as in Claude Code.
+- JavaScript: `export`/`import` written into a CommonJS project is turned into `module.exports`/`require` by code (other forms, and `require` in a `"type": "module"` project, are refused with the form the project uses). Models wrote "exported from" as ESM, Node failed, and they converted the whole project. A file that exports a name it doesn't define is refused.
+- Regexes survive JSON: JSON has no `\s`/`\d`/`\w` escapes, so under constrained decoding a copied `[^\s@]` came out as a line break (or `\ `) and the syntax guard rejected the file again and again. Broken copies of lines the model read are restored.
+- Moving code into a new file: the new file is refused until one of the files the code comes from was read (a tax formula written from the task's words lost its rounding).
+- Builds: missing C# `using` directives for framework types are added by code; failing builds and checks show the code at the error lines; `namespace X;` followed by braces is repaired.
+- Plans: todos about the same file are merged, code in the todo list is refused, "read/identify/locate" todos and test todos nobody asked for are dropped, and moving a file is one todo (a later "fix the imports" todo completes by code once move_file did it). In the middle of a refactor, checks that fail because of a later todo run again after it. "Remember that …" always saves the fact.
+- Tests: when the task is to make failing tests pass, the tests can't be edited.
+- `node server.js`, `python app.py` and `go run .` of a server start it in the background instead of waiting 2 minutes.
+- Replies that run away (a thought that never ends, one line repeated) are stopped while streaming instead of at the 4096-token limit.
+
+**MCP.** `/mcp` lists every server's tools as a checklist; unchecked tools are never offered.
+
+**Models.** Built-in settings for qwen2.5, qwen3, llama3, gemma3, mistral and deepseek-coder-v2 (32k context instead of 8k), and autocomplete tokens for deepseek-coder-v2, starcoder2 and codellama.
+
+**Evaluation: 14 → 38 tasks**, each with hidden tests and a reference solution (`eval.js validate` checks both): .NET, multi-file refactors, TypeScript, failing-test fixes, git, memory, a background server tried with curl, MCP (a mock issue tracker), web (recorded pages) and a plan-then-"ok, do it" conversation. `eval.js fim` measures autocomplete latency. The evaluation also runs nightly in CI.
+
+Measured on an RTX 4070 Ti (Windows 11), 38 tasks × 2 runs:
+
+| | qwen2.5-coder:7b (32k) | qwen3.5:9b | target |
+|---|---|---|---|
+| tool-call validity | 98.7% | 99.8% | ≥ 98% |
+| calls refused by policy (read before edit/move, protected tests) | 6.0% | 1.2% | |
+| edit apply | 89.6% | 95.8% | ≥ 95% |
+| task pass | 78.9% | 93.4% | ≥ 60% |
+| avg steps / time per task | 6.1 / 8.8 s | 6.5 / 9.4 s | |
+
+On the same 38 tasks before these fixes, qwen2.5-coder:7b passed 60.5% (edit apply 77.8%). qwen3.5:9b meets all three targets of the plan and fails no task in both runs; with qwen2.5-coder:7b edit apply is still below 95% (most failed edits are a `search` the model got wrong), and it fails `go-chunk` (it decides the loop is already correct), `js-extract-tax`, `js-fix-failing-tests`, `py-fix-failing-tests` and `git-fix-uncommitted` in both runs. Runs vary by a few points: the full run before the last fixes gave 80.3% and 94.7%.
+
+Autocomplete latency (`eval.js fim`, 40 completions, before the editor's 250 ms debounce): qwen2.5-coder:1.5b p50 60 ms / p90 121 ms on the GPU and p50 325 ms / p90 1.07 s on the CPU only; qwen2.5-coder:7b p50 156 ms / p90 780 ms on the GPU. The plan's goal was p50 under 500 ms on a GPU and about 1 s on a CPU with a 1.5B model.
+
+**Fine-tuning (plan item 14), done.** `scripts/finetune` now runs end to end on Windows: 2,044 samples from successful evaluation runs (`eval.js export --exclude` held 12 tasks out; duplicates are dropped), QLoRA on qwen2.5-coder:7b for one epoch in one hour on the RTX 4070 Ti, then a Q4_K_M GGUF through llama.cpp (current Ollama imports safetensors only for MLX architectures) and `ollama create lolo-coder`. On the 12 held-out tasks, 4 runs each, same build:
+
+| | qwen2.5-coder:7b | lolo-coder | target |
+|---|---|---|---|
+| tool-call validity | 99.5% | 100% | ≥ 98% |
+| edit apply | 84.8% | 91.3% | ≥ 95% |
+| task pass | 72.9% | 77.1% | ≥ 60% |
+| avg steps / time per task | 7.9 / 8.7 s | 6.8 / 8.1 s | |
+
+The fine-tuned model passed more held-out runs in each of the four comparisons made while this release's fixes went in (by 2 to 5 runs), with fewer steps; it reliably writes a correct email check where the base model writes a weak one. The gain is small next to what orchestration gave: the base model went from 61% to 73% on the same tasks. Two things mattered more than the training itself: the Modelfile must keep qwen2.5-coder's template (one that printed every message sent the system prompt twice, and the fine-tuned model passed 39% instead of 75%), and on Windows unsloth's attention has to avoid SDPA's grouped-query path (no FlashAttention there: 3× slower and 12 GB were not enough).
+
+**Releases.** Pushing a `v*` tag builds the .vsix and publishes it to the Marketplace and Open VSX once their tokens are set as repository secrets.
+
 ## 0.4.1
 
 - "Run everything" mode (`/yolo`, `localAgent.autoRunCommands`): edits and terminal commands without asking; dangerous commands stay blocked. The chosen mode now carries over to new conversations.

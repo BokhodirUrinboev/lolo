@@ -211,7 +211,7 @@ function printResult(r: RunResult) {
   console.log(`\n${color}${r.status}${c.reset}\n${r.summary}`);
   if (r.changed.length) console.log(`${c.dim}changed: ${r.changed.join(", ")}${c.reset}`);
   const s = r.stats;
-  console.log(`${c.dim}steps ${s.steps} · tool calls ${s.toolCalls} (${s.invalidCalls} invalid) · edits ${s.editsApplied}/${s.editCalls} · ${(s.ms / 1000).toFixed(1)}s${r.checkpoint ? ` · checkpoint ${r.checkpoint.slice(0, 8)}` : ""}${c.reset}\n`);
+  console.log(`${c.dim}steps ${s.steps} · tool calls ${s.toolCalls} (${s.invalidCalls} invalid${s.refusedCalls ? `, ${s.refusedCalls} refused` : ""}) · edits ${s.editsApplied}/${s.editCalls} · ${(s.ms / 1000).toFixed(1)}s${r.checkpoint ? ` · checkpoint ${r.checkpoint.slice(0, 8)}` : ""}${c.reset}\n`);
 }
 
 function print(e: AgentEvent) {

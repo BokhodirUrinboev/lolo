@@ -9,6 +9,8 @@ import type { Approval, ApprovalRequest, Host } from "../host/types";
 import type { FromWebview, Item, Mode, SessionInfo, ToWebview, Turn, ViewState } from "./protocol";
 import { applyEvent, conversationText, pendingPlanFor, titleOf } from "./transcript";
 
+/** MCP tools switched off in the /mcp menu (workspaceState). */
+export const MCP_DISABLED_KEY = "localAgent.mcpDisabledTools";
 const SESSIONS_KEY = "localAgent.sessions";
 const CURRENT_KEY = "localAgent.currentSession";
 /** Pre-0.2 single transcript; migrated into a session once. */
@@ -287,6 +289,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
     await vscode.window.showTextDocument(uri);
   }
 
+  /** `/mcp`: server status, and which of their tools the agent may use (saved per workspace). */
   private async showMcpStatus() {
     const hub = this.backend.mcp();
     if (!hub) {
@@ -295,8 +298,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
       return;
     }
     await hub.ready();
-    const lines = hub.status().map((s) => (s.ok ? `✓ ${s.name}: ${s.tools} tools` : `✗ ${s.name}: ${s.error}`));
-    void vscode.window.showInformationMessage(`MCP servers — ${lines.join(" · ")}`);
+    const all = hub.allTools();
+    if (!all.length) {
+      const lines = hub.status().map((s) => (s.ok ? `✓ ${s.name}: no tools` : `✗ ${s.name}: ${s.error}`));
+      void vscode.window.showInformationMessage(`MCP servers — ${lines.join(" · ")}`);
+      return;
+    }
+    const items: (vscode.QuickPickItem & { tool?: string })[] = [];
+    for (const s of hub.status()) {
+      items.push({ label: s.ok ? s.name : `${s.name}: not connected (${s.error})`, kind: vscode.QuickPickItemKind.Separator });
+      for (const t of all.filter((x) => x.mcp.server === s.name)) {
+        items.push({
+          label: t.mcp.tool,
+          description: t.mcp.readOnly ? "read-only" : "asks before each call",
+          detail: t.description.replace(/^\[MCP [^\]]*\]\s*/, ""),
+          picked: !hub.disabled.has(t.name),
+          tool: t.name,
+        });
+      }
+    }
+    const picked = await vscode.window.showQuickPick(items, {
+      canPickMany: true,
+      matchOnDetail: true,
+      title: "MCP tools the agent may use",
+      placeHolder: "Checked tools are offered when a task is about them; uncheck the ones you don't want",
+    });
+    if (!picked) return;
+    const on = new Set(picked.map((p) => p.tool));
+    hub.disabled = new Set(all.map((t) => t.name).filter((n) => !on.has(n)));
+    await this.ctx.workspaceState.update(MCP_DISABLED_KEY, [...hub.disabled]);
   }
 
   private async send(text: string, mode: Mode, plan: RunOptions["plan"], includeActiveFile: boolean, images?: string[]) {

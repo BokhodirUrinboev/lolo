@@ -57,6 +57,16 @@ describe("start_process", () => {
     expect(r.output).toContain("boom: port in use");
   });
 
+  it("treats `node <file>` as a server when the file listens", async () => {
+    const { ctx, processes } = setup();
+    ctx.commandAllowlist = ["node"];
+    const r = await tool("run_command").run({ command: "node server.js" }, ctx);
+    expect(r.output).toContain("runs in the background");
+    await processes.stopAll();
+    const plain = await tool("run_command").run({ command: "node crash.js" }, ctx);
+    expect(plain.output).not.toContain("background");
+  });
+
   it("run_command starts servers in the background instead of refusing them", async () => {
     const { ctx, processes } = setup();
     writeFileSync(path.join(ctx.host.root, "package.json"), JSON.stringify({ scripts: { dev: "node server.js" } }));
@@ -66,7 +76,27 @@ describe("start_process", () => {
     expect(r.output).toContain("runs in the background");
     expect(r.output).toMatch(/listening at http:\/\/127\.0\.0\.1:\d+/);
     expect(new ToolRegistry().enabled("agent", ctx).map((t) => t.name)).toContain("process_logs");
+    const url = /http:\/\/127\.0\.0\.1:\d+/.exec(r.output)![0];
     await processes.stopAll();
+    await new Promise((res) => setTimeout(res, 300));
+    // npm → shell → node server.js: the server itself must be gone, not just npm.
+    await expect(fetch(url)).rejects.toThrow();
+  });
+});
+
+describe("parseListener", () => {
+  it("finds the pid listening on a port in netstat output", async () => {
+    const { parseListener } = await import("../src/host/shell");
+    const out = [
+      "  Proto  Local Address          Foreign Address        State           PID",
+      "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1180",
+      "  TCP    127.0.0.1:3123         0.0.0.0:0              LISTENING       18536",
+      "  TCP    127.0.0.1:3123         127.0.0.1:50000        ESTABLISHED     18536",
+      "  TCP    [::]:5173              [::]:0                 LISTENING       9000",
+    ].join("\r\n");
+    expect(parseListener(out, 3123)).toBe(18536);
+    expect(parseListener(out, 5173)).toBe(9000);
+    expect(parseListener(out, 80)).toBeUndefined();
   });
 });
 

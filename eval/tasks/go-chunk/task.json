@@ -1,0 +1,4 @@
+{
+  "task": "Chunk(xs, size) in chunk.go drops the last partial chunk: Chunk([]int{1, 2, 3, 4, 5}, 2) must be [[1 2] [3 4] [5]]. For size <= 0 it must return nil.",
+  "check": "go test -timeout 30s ./..."
+}

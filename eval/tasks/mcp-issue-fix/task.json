@@ -1,0 +1,15 @@
+{
+  "task": "Fix issue 42 from the tracker.",
+  "check": "node --test",
+  "mcp": {
+    "tracker": {
+      "command": "node",
+      "args": [
+        "{task}/../../mcp/tracker.cjs"
+      ],
+      "env": {
+        "TRACKER_STATE": "{workspace}/.agent/cache/tracker.json"
+      }
+    }
+  }
+}

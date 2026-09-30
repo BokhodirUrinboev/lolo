@@ -114,7 +114,7 @@ describe("Agent Lolo as an MCP server", () => {
     const { execFileSync } = await import("node:child_process");
     const { existsSync, readFileSync } = await import("node:fs");
     const cli = path.join(__dirname, "..", "dist", "cli.js");
-    if (!existsSync(cli)) execFileSync("npm", ["run", "build"], { cwd: path.join(__dirname, "..") });
+    if (!existsSync(cli)) execFileSync(process.execPath, ["esbuild.mjs"], { cwd: path.join(__dirname, "..") });
     const root = mkdtempSync(path.join(tmpdir(), "lolo-srv-"));
     mkdirSync(path.join(root, "src"));
     writeFileSync(path.join(root, "src/a.js"), "function calcTotal(xs) {\n    return xs.reduce((s, x) => s + x, 0);\n}\nmodule.exports = { calcTotal };\n");

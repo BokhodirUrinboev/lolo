@@ -3,16 +3,27 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "0 1 * * *" # nightly eval
   workflow_dispatch:
     inputs:
       eval:
         description: Run the eval against Ollama (slow; pulls a ~5 GB model)
         type: boolean
         default: false
+      runs:
+        description: Runs per eval task
+        type: string
+        default: "2"
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,18 +33,24 @@ jobs:
       - run: npm test
       - run: npm run build
       - name: VS Code smoke test
+        if: runner.os == 'Linux'
         run: xvfb-run -a node scripts/vscode-smoke.mjs
+      - name: VS Code smoke test
+        if: runner.os != 'Linux'
+        run: node scripts/vscode-smoke.mjs
 
   eval:
-    if: github.event_name == 'workflow_dispatch' && inputs.eval
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.eval)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: "10.0.x" }
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
       - run: npm ci && npm run build
       - name: Ollama + model
         run: |
@@ -41,6 +58,8 @@ jobs:
           ollama pull qwen2.5-coder:7b
           printf 'FROM qwen2.5-coder:7b\nPARAMETER num_ctx 32768\n' > Modelfile
           ollama create qwen2.5-coder-32k -f Modelfile
-      - run: node dist/eval.js run --runs 2
+      # CPU-only runners are slow: one run per task at night, `runs` when started by hand.
+      - run: node dist/eval.js run --runs ${{ github.event_name == 'schedule' && '1' || inputs.runs }}
       - uses: actions/upload-artifact@v4
+        if: always()
         with: { name: eval-results, path: eval/results }

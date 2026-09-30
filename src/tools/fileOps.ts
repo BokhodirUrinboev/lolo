@@ -50,6 +50,7 @@ export const moveFile: ToolDef<{ from: string; to: string }> = {
     } else if (/\.((c|m)?(j|t)sx?|py)$/.test(a.to)) {
       note = "No file imported it by a relative path or module name.";
     }
+    (ctx.moved ??= new Map()).set(a.from, a.to);
     return ok(`Moved ${a.from} to ${a.to}. ${note}`, `move_file ${a.from} → ${a.to}${updates.length ? ` (+${updates.length} imports)` : ""}`, changed);
   },
 };

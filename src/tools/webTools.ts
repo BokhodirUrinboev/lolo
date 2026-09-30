@@ -16,7 +16,8 @@ const MAX_PIECES = 4;
 async function approve(ctx: ToolContext, what: string, reason: string): Promise<string | undefined> {
   const a = ctx.host.approveCommand ? await ctx.host.approveCommand(what, reason) : { ok: await ctx.host.confirm(`${what}? (${reason})`) };
   if (a.ok) return undefined;
-  return `The user declined: ${what}.${a.feedback ? ` They said: ${a.feedback}` : ""}`;
+  // Small models otherwise fill the gap from memory (a made-up version or port).
+  return `The user declined: ${what}.${a.feedback ? ` They said: ${a.feedback}` : ""} Don't guess what that would have told you: if the task needs it, call done and say which information is missing.`;
 }
 
 export const webSearchTool: ToolDef<{ query: string }> = {
@@ -47,8 +48,8 @@ export const fetchUrl: ToolDef<{ url: string; question?: string }> = {
   description: "Read a web page (docs, README, changelog) as text. `question`: what you need from it; long pages are reduced to the relevant parts.",
   params: { type: "object", properties: { url: { type: "string", minLength: 8 }, question: { type: "string" } }, required: ["url"] },
   available: (ctx) => !!ctx.web,
-  async check(a) {
-    const blocked = await blockedReason(a.url);
+  async check(a, ctx) {
+    const blocked = await blockedReason(a.url, { resolve: !ctx.web?.replay });
     return blocked ? `Cannot fetch ${a.url}: ${blocked}.` : undefined;
   },
   async run(a, ctx) {
@@ -57,7 +58,7 @@ export const fetchUrl: ToolDef<{ url: string; question?: string }> = {
     if (declined) return fail(declined, `fetch_url ${a.url}: declined`);
     let page;
     try {
-      page = await fetchPage(a.url, ctx.host.root, ctx.signal);
+      page = await fetchPage(a.url, ctx.host.root, ctx.signal, ctx.web?.replay);
     } catch (e) {
       return fail(`Could not fetch ${a.url}: ${(e as Error).message}`, `fetch_url ${a.url}: failed`);
     }

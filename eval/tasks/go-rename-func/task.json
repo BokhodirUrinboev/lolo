@@ -1,0 +1,4 @@
+{
+  "task": "Rename the function ParseCSV in data/parse.go to ParseRecords, and update every call to it (including the tests).",
+  "check": "! grep -rqw ParseCSV --include=*.go . && go test ./..."
+}

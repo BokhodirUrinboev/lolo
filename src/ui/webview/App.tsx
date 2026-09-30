@@ -64,7 +64,7 @@ const SLASH: { cmd: string; hint: string; run: () => void }[] = [
   { cmd: "/restore", hint: "Restore a checkpoint", run: () => post({ type: "command", id: "restoreCheckpoint" }) },
   { cmd: "/edit", hint: "Edit the selection in the editor (Ctrl+I)", run: () => post({ type: "command", id: "inlineEdit" }) },
   { cmd: "/settings", hint: "Open Agent Lolo settings", run: () => post({ type: "command", id: "openSettings" }) },
-  { cmd: "/mcp", hint: "Show MCP server status", run: () => post({ type: "mcpStatus" }) },
+  { cmd: "/mcp", hint: "MCP servers: status, and which tools the agent may use", run: () => post({ type: "mcpStatus" }) },
   { cmd: "/memory", hint: "Edit what Agent Lolo remembers (.agent/memory.md)", run: () => post({ type: "command", id: "openMemory" }) },
 ];
 

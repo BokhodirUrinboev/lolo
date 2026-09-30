@@ -5,3 +5,5 @@ dist/
 .agent/trajectories/
 .agent/index/
 .agent/cache/
+eval/results/
+out/

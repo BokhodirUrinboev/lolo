@@ -1,0 +1,4 @@
+{
+  "task": "add(a, b) in src/money.ts silently mixes currencies. Make it throw an Error with the message \"currency mismatch\" when a and b have different currencies.",
+  "check": "node --test"
+}

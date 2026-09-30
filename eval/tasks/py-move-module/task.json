@@ -1,0 +1,4 @@
+{
+  "task": "Move billing/utils.py to billing/money/format.py and update every import of it.",
+  "check": "test -f billing/money/format.py && test ! -e billing/utils.py && python3 -m unittest -q && python3 app.py"
+}

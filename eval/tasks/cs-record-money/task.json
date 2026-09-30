@@ -1,0 +1,4 @@
+{
+  "task": "Two Money values (Money.cs) with the same Amount and Currency must be equal: with ==, with Equals, and as dictionary or set keys. Keep the constructor, Add and ToString.",
+  "check": "dotnet run --project . -v q"
+}

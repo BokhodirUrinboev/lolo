@@ -1,0 +1,19 @@
+{
+  "search": [
+    {
+      "results": [
+        {
+          "title": "API changelog | Paynest docs",
+          "url": "https://docs.paynest.example/changelog",
+          "snippet": "Every API version, newest first. Send the version in the Paynest-Version header."
+        }
+      ]
+    }
+  ],
+  "pages": {
+    "https://docs.paynest.example/changelog": {
+      "title": "API changelog | Paynest docs",
+      "text": "# API changelog\n\nEach release is a dated API version. Send it in the `Paynest-Version` header; requests without it use your account's default version.\n\n## 2026-08-14 (latest)\n\n- Refunds accept an optional `reason`.\n- `GET /v1/payouts` supports `limit` up to 500.\n\n## 2026-03-02\n\n- New payouts API.\n- Deprecated `charge.source`.\n\n## 2025-11-20\n\n- First public version.\n"
+    }
+  }
+}

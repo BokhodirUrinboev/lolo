@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
@@ -6,6 +5,7 @@ import type { EditorContext } from "../context/collectors";
 import type { SymbolLocation } from "../context/mentions";
 import type { DiffReviewManager } from "../edit/diffView";
 import { cleanTerminalOutput } from "../tools/output";
+import { commandEnv, commandShell, killTree, pathKey, pythonShims, spawnCommand } from "./shell";
 import { Approval, ApprovalRequest, CommandResult, DEFAULT_COMMAND_TIMEOUT_MS, Diagnostic, FileChange, Host, SourcePos, WriteOutcome } from "./types";
 
 export interface VsCodeHostOptions {
@@ -186,6 +186,18 @@ export class VsCodeHost implements Host {
    * Runs in a visible terminal via shell integration (output + exit code), falling
    * back to a hidden child process when shell integration is unavailable.
    */
+  /**
+   * On Windows the agent's terminal is Git Bash when installed: models write POSIX
+   * commands, and PowerShell 5.1 has no `&&`. Otherwise the user's default shell.
+   */
+  private readonly gitBash = process.platform === "win32" ? commandShell().file : undefined;
+
+  get shell() {
+    if (this.gitBash) return commandShell().label;
+    if (process.platform === "win32") return "PowerShell";
+    return path.basename(vscode.env.shell || "bash");
+  }
+
   async runCommand(command: string, signal?: AbortSignal, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<CommandResult> {
     const timeoutMs = opts.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     const dir = path.join(this.root, opts.cwd ?? ".");
@@ -194,8 +206,10 @@ export class VsCodeHost implements Host {
     if (!shell) return this.runHidden(command, signal, dir, timeoutMs);
     term.show(true);
     // The terminal keeps its directory between commands, so always cd explicitly.
-    // Windows' default shell is PowerShell 5.1, which has no `&&`.
-    const cd = process.platform === "win32" ? `Set-Location -LiteralPath '${dir.replace(/'/g, "''")}'; ` : `cd ${JSON.stringify(dir)} && `;
+    const cd =
+      process.platform === "win32" && !this.gitBash
+        ? `Set-Location -LiteralPath '${dir.replace(/'/g, "''")}'; ` // PowerShell 5.1: no `&&`
+        : `cd ${JSON.stringify(process.platform === "win32" ? dir.replace(/\\/g, "/") : dir)} && `;
     const execution = shell.executeCommand(`${cd}${command}`);
     let timedOut = false;
     let output = "";
@@ -236,7 +250,17 @@ export class VsCodeHost implements Host {
   private async agentTerminal(): Promise<vscode.Terminal> {
     if (this.terminal && this.terminal.exitStatus === undefined) return this.terminal;
     // MSBuild's terminal logger redraws progress lines, which the captured output turns into noise.
-    this.terminal = vscode.window.createTerminal({ name: "Agent Lolo", cwd: this.folder.uri, isTransient: true, env: { MSBUILDTERMINALLOGGER: "off" } });
+    const env: Record<string, string> = { MSBUILDTERMINALLOGGER: "off" };
+    const shims = pythonShims();
+    if (shims) env.PATH = shims + path.delimiter + (process.env[pathKey(process.env)] ?? "");
+    this.terminal = vscode.window.createTerminal({
+      name: "Agent Lolo",
+      cwd: this.folder.uri,
+      isTransient: true,
+      env,
+      // CHERE_INVOKING keeps a Git Bash login shell in cwd; MSYS_NO_PATHCONV keeps "/health" from becoming a Windows path.
+      ...(this.gitBash ? { shellPath: this.gitBash, shellArgs: ["--login", "-i"], env: { ...env, CHERE_INVOKING: "1", MSYS_NO_PATHCONV: "1" } } : {}),
+    });
     // A terminal that was never shown may not start its shell.
     this.terminal.show(true);
     // Shell integration activates asynchronously after the shell starts.
@@ -260,15 +284,27 @@ export class VsCodeHost implements Host {
   private runHidden(command: string, signal: AbortSignal | undefined, cwd: string, timeoutMs: number): Promise<CommandResult> {
     this.opts.output.appendLine(`$ ${command}  (shell integration unavailable; running hidden)`);
     return new Promise((resolve) => {
-      const p = spawn(command, { cwd, shell: true, signal, timeout: timeoutMs, env: { ...process.env, MSBUILDTERMINALLOGGER: "off" } });
+      const p = spawnCommand(command, { cwd, env: commandEnv({ MSBUILDTERMINALLOGGER: "off" }) });
       let output = "";
-      p.stdout.on("data", (d) => (output += d));
-      p.stderr.on("data", (d) => (output += d));
-      p.on("error", (e) => resolve({ exitCode: -1, output: output + String(e) }));
+      let timedOut = false;
+      const stop = () => (p.pid ? killTree(p.pid) : p.kill());
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stop();
+      }, timeoutMs);
+      signal?.addEventListener("abort", stop, { once: true });
+      p.stdout?.on("data", (d) => (output += d));
+      p.stderr?.on("data", (d) => (output += d));
+      p.on("error", (e) => {
+        clearTimeout(timer);
+        resolve({ exitCode: -1, output: output + String(e), timedOut });
+      });
       p.on("close", (code) => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", stop);
         output = cleanTerminalOutput(output);
         this.lastTerminalOutput = output;
-        resolve({ exitCode: code ?? -1, output });
+        resolve({ exitCode: code ?? -1, output, timedOut });
       });
     });
   }

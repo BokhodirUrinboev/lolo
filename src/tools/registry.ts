@@ -1,3 +1,5 @@
+import { namedFiles } from "../agent/planner";
+import { isTestFile, TESTS_PROTECTED } from "../agent/testGuard";
 import { enabledEditTools } from "../edit/formats";
 import { answer, done } from "./control";
 import { getDiagnostics } from "./diagnostics";
@@ -31,13 +33,40 @@ export const ALL_TOOLS: ToolDef[] = [
   done, answer,
 ];
 
+/** Longest `thought` the schema allows: qwen3.5 sometimes reasons in it until the token limit (55 s a step). */
+export const THOUGHT_MAX = 800;
+
+/** Tools that change an existing file's lines: the model must have seen the file first. */
+const EDITS_EXISTING = new Set(["edit", "rewrite_file", "edit_lines"]);
+
+const MOVES_CODE = /\b(?:move[sd]?|moving|extract(?:s|ed|ing)?|split(?:s|ting)?|out of|(?:factor|pull)(?:s|ed|ing)? out)\b/i;
+const CODE_FILE = /\.(?:tsx?|jsx?|mjs|cjs|py|cs|fs|go|java|kt|rs|rb|php|cpp|cc|c|hpp|h|swift)$/;
+
+/**
+ * When the todo or the message moves code and `path` is a new code file: the existing code files they
+ * name, if the model has read none of them yet (one is enough to copy from). Otherwise [].
+ */
+async function unreadSources(path: string, ctx: ToolContext): Promise<string[]> {
+  const text = `${ctx.todo ?? ""}\n${ctx.message ?? ""}`;
+  if (!CODE_FILE.test(path) || !MOVES_CODE.test(text)) return [];
+  const named: string[] = [];
+  for (const name of namedFiles(text)) {
+    const r = resolveWorkspacePath(ctx.host.root, name);
+    if ("error" in r || r.path === path || !CODE_FILE.test(r.path) || named.includes(r.path)) continue;
+    if (ctx.seen!.has(r.path)) return [];
+    if ((await ctx.host.stat(r.path)) === "file") named.push(r.path);
+  }
+  return named;
+}
+
 export interface Action {
   thought: string;
   tool: string;
   args: Record<string, unknown>;
 }
 
-export type Checked = { ok: true; tool: ToolDef; args: any } | { ok: false; error: string };
+/** `policy`: a well-formed call the orchestration refuses (read before edit, protected tests), not a model format error. */
+export type Checked = { ok: true; tool: ToolDef; args: any } | { ok: false; error: string; policy?: boolean };
 
 export class ToolRegistry {
   /** Built-in tools plus this run's external (MCP) tools. */
@@ -70,7 +99,7 @@ export class ToolRegistry {
     return {
       type: "object",
       properties: {
-        thought: { type: "string", description: "One or two sentences: what you do next and why." },
+        thought: { type: "string", maxLength: THOUGHT_MAX, description: "One or two sentences: what you do next and why." },
         action: {
           anyOf: tools.map((t) => ({
             type: "object",
@@ -146,6 +175,23 @@ export class ToolRegistry {
       if ("error" in r) return { ok: false, error: r.error };
       if (tool.kind === "write" && writeForbidden(r.path)) return { ok: false, error: `Writing to ${r.path} is not allowed.` };
       args.path = r.path;
+    }
+    // Read before edit (as in Claude Code): models guess the lines of files they haven't seen.
+    if (ctx.seen && EDITS_EXISTING.has(tool.name) && typeof args.path === "string" && !ctx.seen.has(args.path) && (await ctx.host.stat(args.path)) === "file") {
+      return { ok: false, policy: true, error: `You haven't read ${args.path} in this task. Read it first (read_file), then change it using its exact lines.` };
+    }
+    // Code moving into a new file: read where it comes from first. Models wrote the new file from the
+    // task's words (a tax formula lost its rounding) or as stubs.
+    if (ctx.seen && tool.kind === "write" && typeof args.path === "string" && (await ctx.host.stat(args.path)) === null) {
+      const sources = await unreadSources(args.path, ctx);
+      if (sources.length) {
+        return { ok: false, policy: true, error: `Read the code that moves into ${args.path} first (read_file ${sources.join(" or ")}), then copy it exactly: formulas, rounding and messages, not a version written from the task's description.` };
+      }
+    }
+    // "The tests fail, fix it": existing tests stay as they are (see agent/testGuard.ts).
+    const target = typeof args.path === "string" ? args.path : typeof args.from === "string" ? args.from : undefined;
+    if (ctx.protectTests && tool.kind === "write" && tool.name !== "create_file" && target && isTestFile(target) && (await ctx.host.stat(target)) === "file") {
+      return { ok: false, policy: true, error: `${target} ${TESTS_PROTECTED}` };
     }
     const semantic = await tool.check?.(args, ctx);
     if (semantic) return { ok: false, error: semantic };

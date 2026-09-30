@@ -8,7 +8,7 @@ import { inlineEdit } from "./inline/inlineEdit";
 import { configKey, loadMcpConfig, McpHub, McpServerConfig } from "./mcp/hub";
 import { createProvider, ProviderConfig } from "./providers";
 import { resolveProfile, type ProfileOverride } from "./providers/modelProfiles";
-import { ChatBackend, ChatViewProvider } from "./ui/chatView";
+import { ChatBackend, ChatViewProvider, MCP_DISABLED_KEY } from "./ui/chatView";
 import type { Mode } from "./ui/protocol";
 import type { WebConfig, WebProvider } from "./web/search";
 
@@ -77,6 +77,7 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
     if (mcp?.key !== key) {
       void mcp?.hub.close();
       mcp = { key, hub: new McpHub(configs, folder.uri.fsPath, (m) => output.appendLine(m)) };
+      mcp.hub.disabled = new Set(context.workspaceState.get<string[]>(MCP_DISABLED_KEY, []));
     }
     return mcp.hub;
   };

@@ -27,8 +27,9 @@ export function toolNeeds(todo: string, message = "", opts: { largeRepo?: boolea
   const needs = new Set<ToolGroup>();
   // Web access is the user's call: their message (@web, a URL, "search online") counts, not just the todo.
   if (WEB.test(todo) || WEB.test(message)) needs.add("web");
-  if (GIT.test(todo)) needs.add("git");
-  if (FILE_OPS.test(todo)) needs.add("fileops");
+  if (GIT.test(todo) || GIT.test(message)) needs.add("git");
+  // Planners split "move X to Y" into "create Y" + "fix the imports": the message decides too.
+  if (FILE_OPS.test(todo) || FILE_OPS.test(message)) needs.add("fileops");
   if (REFACTOR.test(todo)) needs.add("refactor");
   if (PROCESS.test(todo)) needs.add("process");
   if (MEMORY.test(todo) || MEMORY.test(message)) needs.add("memory");

@@ -58,6 +58,12 @@ describe("allowedKinds", async () => {
       expect(allowedKinds(t), t).toContain("task");
     }
   });
+  it("makes 'remember ...' a task (the remember tool), not small talk", () => {
+    for (const t of ["Remember for future conversations that we use tabs", "From now on, use single quotes", "can you remember that the API port is 8080?", "buni eslab qol: port 8080", "Запомни: порт 8080"]) {
+      expect(allowedKinds(t), t).toEqual(["task"]);
+    }
+    expect(allowedKinds("Do you remember what we changed yesterday?")).not.toEqual(["task"]);
+  });
 });
 
 describe("uzbekHints", async () => {

@@ -190,12 +190,14 @@ describe("move_file updates imports", () => {
   it("rewrites Python module imports", async () => {
     const { root, ctx } = workspace({
       "app/helpers.py": "def h():\n    return 1\n",
-      "app/main.py": "from app.helpers import h\nimport app.helpers\nimport app.helpers_extra\n",
+      "app/main.py": "from app.helpers import h\nimport app.helpers\nimport app.helpers_extra\n\nprint(app.helpers.h(), app.helpers_extra.x)\n",
     });
     const r = await tool("move_file").run({ from: "app/helpers.py", to: "app/util/helpers.py" }, ctx);
     expect(r.output).toContain("Updated the imports in app/main.py");
     const { readFileSync } = await import("node:fs");
-    expect(readFileSync(path.join(root, "app/main.py"), "utf8")).toBe("from app.util.helpers import h\nimport app.util.helpers\nimport app.helpers_extra\n");
+    expect(readFileSync(path.join(root, "app/main.py"), "utf8")).toBe(
+      "from app.util.helpers import h\nimport app.util.helpers\nimport app.helpers_extra\n\nprint(app.util.helpers.h(), app.helpers_extra.x)\n",
+    );
   });
 });
 

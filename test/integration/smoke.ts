@@ -71,7 +71,7 @@ export async function run(): Promise<void> {
   assert.ok((await host.readFile("src/use.ts")).includes('import { sumAll } from "./price";'));
   log("LSP references + rename ok");
 
-  const r = await host.runCommand("sh -c 'echo smoke-out; exit 3'");
+  const r = await host.runCommand(`node -e "console.log('smoke-out'); process.exit(3)"`);
   log(`runCommand: exit ${r.exitCode}, output ${JSON.stringify(r.output.slice(0, 200))}`);
   assert.strictEqual(r.exitCode, 3);
   assert.ok(r.output.includes("smoke-out"));

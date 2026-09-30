@@ -1,0 +1,6 @@
+{
+  "task": "Set API_VERSION in src/client.js to the latest API version from the changelog at https://docs.paynest.example/changelog.",
+  "check": "node --test",
+  "web": "web.json",
+  "approve": true
+}

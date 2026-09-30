@@ -1,0 +1,4 @@
+{
+  "task": "Remember for future conversations that this project uses 2-space indentation and single quotes in JavaScript.",
+  "check": "grep -qiE \"single.?quot\" .agent/memory.md && grep -qiE \"(2|two).?spaces?\" .agent/memory.md && git diff --quiet -- src"
+}

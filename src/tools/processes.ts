@@ -1,6 +1,7 @@
-import { ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import * as path from "node:path";
+import { commandEnv, killTree, listenerPid, listeningPorts, spawnCommand } from "../host/shell";
 import { decideCommand } from "./commandPolicy";
 import { truncateOutput } from "./output";
 import { resolveWorkspacePath } from "./paths";
@@ -26,6 +27,11 @@ interface Proc {
   /** Output offset already shown to the model. */
   shown: number;
   exitCode?: number | null;
+  /** The port it was started for (start_process `port`), when it opened. */
+  port?: number;
+  stopped?: boolean;
+  /** Windows: ports in use before it started; the cleanup in stop() never touches those. */
+  portsBefore: Set<number>;
 }
 
 export class ProcessManager {
@@ -42,14 +48,11 @@ export class ProcessManager {
     return this.procs.get(id);
   }
 
-  start(command: string, cwd = "."): Proc {
-    const child = spawn(command, {
-      cwd: path.join(this.root, cwd),
-      shell: true,
-      detached: process.platform !== "win32", // own process group, so stop() also ends what the shell started
-      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1", BROWSER: "none", CI: "1" },
-    });
-    const p: Proc = { id: this.nextId++, command, child, output: "", shown: 0 };
+  async start(command: string, cwd = "."): Promise<Proc> {
+    const portsBefore = await listeningPorts(); // before spawning: a fast server would be in it already
+    // Own process group (POSIX) / taskkill /T (Windows), so stop() also ends what the shell started.
+    const child = spawnCommand(command, { cwd: path.join(this.root, cwd), env: commandEnv({ FORCE_COLOR: "0", NO_COLOR: "1", BROWSER: "none", CI: "1" }) });
+    const p: Proc = { id: this.nextId++, command, child, output: "", shown: 0, portsBefore };
     const add = (d: Buffer) => {
       p.output += d.toString();
       if (p.output.length > MAX_BUFFER) {
@@ -74,32 +77,35 @@ export class ProcessManager {
     const until = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < until && !signal?.aborted) {
       if (p.exitCode !== undefined) return "exited";
-      if (port ? await portOpen(port) : READY.test(p.output)) return "ready";
+      if (port ? await portOpen(port) : READY.test(p.output)) {
+        if (port) p.port = port;
+        return "ready";
+      }
       await new Promise((r) => setTimeout(r, 300));
     }
     return "timeout";
   }
 
   async stop(p: Proc): Promise<void> {
-    if (p.exitCode !== undefined || !p.child.pid) return;
-    const exited = new Promise<void>((r) => p.child.once("exit", () => r()));
-    kill(p.child.pid, "SIGTERM");
-    const t = setTimeout(() => p.child.pid && kill(p.child.pid, "SIGKILL"), 3000);
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 4000))]);
-    clearTimeout(t);
+    if (!p.child.pid || p.stopped) return;
+    p.stopped = true;
+    if (p.exitCode === undefined) {
+      const exited = new Promise<void>((r) => p.child.once("exit", () => r()));
+      killTree(p.child.pid, "SIGTERM");
+      const t = setTimeout(() => p.child.pid && killTree(p.child.pid, "SIGKILL"), 3000);
+      await Promise.race([exited, new Promise((r) => setTimeout(r, 4000))]);
+      clearTimeout(t);
+    }
+    // Windows: a server started through Git Bash can sit outside the process tree taskkill
+    // walks; whatever still listens on the local port it reported (and that was free before) is it.
+    const port = p.port ?? Number(/:(\d+)$/.exec(localListenUrl(p.output) ?? "")?.[1]);
+    const pid = port && !p.portsBefore.has(port) ? await listenerPid(port) : undefined;
+    if (pid && pid !== process.pid) killTree(pid);
   }
 
+  /** Stops every process of this run, including ones whose shell already exited. */
   async stopAll(): Promise<void> {
-    await Promise.all(this.running().map((p) => this.stop(p)));
-  }
-}
-
-function kill(pid: number, sig: NodeJS.Signals) {
-  try {
-    if (process.platform === "win32") spawn("taskkill", ["/pid", String(pid), "/T", "/F"]);
-    else process.kill(-pid, sig);
-  } catch {
-    /* already gone */
+    await Promise.all([...this.procs.values()].map((p) => this.stop(p)));
   }
 }
 
@@ -118,9 +124,13 @@ function portOpen(port: number): Promise<boolean> {
 
 /** The address the server listens on; other URLs in the log (docs, advisories) don't count. */
 export function listenUrl(output: string): string | undefined {
-  const local = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\*|\+):\d+/.exec(output)?.[0];
-  const url = local ?? /https?:\/\/[\w.-]+:\d+/.exec(output)?.[0];
+  const url = localListenUrl(output) ?? /https?:\/\/[\w.-]+:\d+/.exec(output)?.[0];
   return url?.replace(/0\.0\.0\.0|\[::1?\]|\*|\+/, "localhost");
+}
+
+/** A local listening address in the log (localhost, 127.0.0.1, 0.0.0.0, [::], * or +), never a remote URL. */
+function localListenUrl(output: string): string | undefined {
+  return /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\*|\+):\d+/.exec(output)?.[0];
 }
 
 function tail(text: string, lines = 30): string {
@@ -161,7 +171,7 @@ export const startProcess: ToolDef<{ command: string; cwd?: string; port?: numbe
       }
     }
     for (const old of pm.running().filter((p) => p.command === a.command)) await pm.stop(old);
-    const p = pm.start(a.command, a.cwd);
+    const p = await pm.start(a.command, a.cwd);
     const state = await pm.waitReady(p, a.port, ctx.signal);
     p.shown = p.output.length;
     if (state === "exited") {

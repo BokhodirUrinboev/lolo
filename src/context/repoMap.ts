@@ -191,7 +191,7 @@ function depth(f: string) {
 }
 
 export function listFiles(host: Host): Promise<string[]> {
-  const args = ["--files", "--color=never"];
+  const args = ["--files", "--color=never", "--path-separator=/"];
   for (const d of IGNORED_DIRS) args.push("--glob", `!${d}/`);
   return new Promise((resolve) => {
     const p = spawn(findRg(host.rgPath?.()), args, { cwd: host.root });

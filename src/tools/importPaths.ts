@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { FileChange, Host } from "../host/types";
+import { search } from "./search";
 import { filesWithWord } from "./symbolTools";
 import type { ToolContext } from "./types";
 
@@ -38,6 +39,41 @@ function pyModule(file: string): string | undefined {
   return file.slice(0, -3).replace(/\/__init__$/, "").split("/").join(".");
 }
 
+/** The ways text refers to a file: `billing/utils.py`, `billing/utils`, `utils/format`, `billing.utils`. */
+function pathForms(file: string): string[] {
+  const noExt = file.replace(/\.[^./]+$/, "");
+  const parts = noExt.split("/");
+  const forms = [file, noExt];
+  if (parts.length >= 2) forms.push(parts.slice(-2).join("/"));
+  if (file.endsWith(".py") && parts.length >= 2) forms.push(noExt.replace(/\/__init__$/, "").split("/").join("."));
+  return [...new Set(forms)];
+}
+
+/** Whether `todo` names `file` (as a path, an import path or a Python module). */
+export function mentionsPath(todo: string, file: string): boolean {
+  return pathForms(file).some((f) => todo.includes(f));
+}
+
+/**
+ * Whether code still points at the old place of a moved file: its last two path segments
+ * (`utils/format`, as relative imports write it) or its Python module (`billing.utils`).
+ * A file at the root can't be told apart from other uses of its name: true (the model checks).
+ */
+export async function stillReferenced(ctx: ToolContext, from: string): Promise<boolean> {
+  const noExt = from.replace(/\.[^./]+$/, "");
+  const parts = noExt.split("/");
+  if (parts.length < 2) return true;
+  const needles = [parts.slice(-2).join("/"), ...(from.endsWith(".py") ? [parts.join(".")] : [])];
+  for (const query of needles) {
+    const r = await search.run({ query }, ctx);
+    if (!r.ok) return true;
+    if (r.output.startsWith("No matches")) continue;
+    const files = r.output.split("\n").map((l) => l.slice(0, Math.max(0, l.indexOf(":")))).filter((f) => /\.((c|m)?(j|t)sx?|py)$/.test(f));
+    if (files.length) return true;
+  }
+  return false;
+}
+
 /**
  * New contents for files whose imports pointed at `from` (moved to `to`), including the moved
  * file's own relative imports. `before` lists the workspace files as they were before the move.
@@ -74,11 +110,15 @@ export async function importUpdates(ctx: ToolContext, from: string, to: string, 
     const last = oldMod.split(".").pop()!;
     const esc = oldMod.replace(/\./g, "\\.");
     const re = new RegExp(`^(\\s*(?:from|import)\\s+)${esc}(?=[\\s.,;]|$)`, "gm");
+    // `import pkg.mod` is used as `pkg.mod.name(...)`: those qualified uses change too.
+    const plainImport = new RegExp(`^\\s*import\\s+${esc}\\s*$`, "m");
+    const qualified = new RegExp(`(?<![\\w.])${esc}\\.(?=[A-Za-z_])`, "g");
     for (const f of await filesWithWord(ctx, last)) {
       if (!f.endsWith(".py")) continue;
       const text = await host.readFile(f).catch(() => undefined);
       if (text === undefined) continue;
-      const next = text.replace(re, `$1${newMod}`);
+      let next = text.replace(re, `$1${newMod}`);
+      if (plainImport.test(text)) next = next.replace(qualified, `${newMod}.`);
       if (next !== text) out.push({ path: f, content: next });
     }
   }

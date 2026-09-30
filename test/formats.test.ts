@@ -90,6 +90,18 @@ describe("resolveProfile", () => {
     expect(resolveProfile("qwen2.5-coder:7b").fim).toBeDefined();
     expect(resolveProfile("some/unknown:1b").ctx).toBe(8192);
   });
+
+  it("knows the common families, the longest match winning", () => {
+    expect(resolveProfile("qwen2.5:7b").ctx).toBe(32768);
+    expect(resolveProfile("qwen2.5:7b").fim).toBeUndefined();
+    expect(resolveProfile("qwen2.5-coder:1.5b").fim?.prefix).toBe("<|fim_prefix|>");
+    expect(resolveProfile("qwen3:8b")).toMatchObject({ ctx: 32768, think: false });
+    expect(resolveProfile("qwen3-coder:30b").ctx).toBe(65536);
+    expect(resolveProfile("qwen3.5:9b").ctx).toBe(65536);
+    expect(resolveProfile("llama3.1:8b").ctx).toBe(32768);
+    expect(resolveProfile("deepseek-coder-v2:16b").fim?.middle).toBe("<｜fim▁end｜>");
+    expect(resolveProfile("starcoder2:3b").fim?.prefix).toBe("<fim_prefix>");
+  });
   it("lets user overrides win", () => {
     expect(resolveProfile("qwen3.5:9b", [{ match: "qwen3.5", ctx: 131072 }]).ctx).toBe(131072);
   });

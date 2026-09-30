@@ -42,8 +42,34 @@ const QWEN_FIM: FimTokens = {
   fileSep: "<|file_sep|>",
 };
 
+const DEEPSEEK_FIM: FimTokens = { prefix: "<｜fim▁begin｜>", suffix: "<｜fim▁hole｜>", middle: "<｜fim▁end｜>", stop: ["<｜end▁of▁sentence｜>", "<｜EOT｜>"] };
+const STARCODER_FIM: FimTokens = { prefix: "<fim_prefix>", suffix: "<fim_suffix>", middle: "<fim_middle>", stop: ["<|endoftext|>", "<file_sep>"] };
+const CODELLAMA_FIM: FimTokens = { prefix: "<PRE> ", suffix: " <SUF>", middle: " <MID>", stop: ["<EOT>"] };
+
+/** General (not coder) instruct models: schema tool calls, no FIM (autocomplete falls back to an installed coder model). */
+const general = (match: string, ctx: number, extra: Partial<ModelProfile> = {}): ProfileOverride => ({
+  match,
+  ctx,
+  toolMode: "schema",
+  editFormat: "auto",
+  wholeFileMaxLines: 150,
+  temperature: 0.2,
+  maxOutput: 4096,
+  ...extra,
+});
+
 const BUILTIN: ProfileOverride[] = [
   { match: "qwen2.5-coder", ctx: 32768, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 150, fim: QWEN_FIM, temperature: 0.2, maxOutput: 4096 },
+  // Other families, at a context that fits ~8-12 GB of VRAM; raise `ctx` in localAgent.profiles when you have more.
+  general("qwen2.5", 32768),
+  general("qwen3", 32768, { think: false }),
+  general("llama3", 32768),
+  general("gemma3", 32768),
+  general("mistral", 32768),
+  { match: "deepseek-coder-v2", ctx: 32768, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 150, fim: DEEPSEEK_FIM, temperature: 0.2, maxOutput: 4096 },
+  // Base models for autocomplete (localAgent.autocomplete.model).
+  { match: "starcoder2", ctx: 16384, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 100, fim: STARCODER_FIM, temperature: 0.2, maxOutput: 2048 },
+  { match: "codellama", ctx: 16384, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 100, fim: CODELLAMA_FIM, temperature: 0.2, maxOutput: 2048 },
   // qwen2.5-coder fine-tuned on Lolo trajectories (scripts/finetune).
   { match: "lolo-coder", ctx: 32768, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 150, fim: QWEN_FIM, temperature: 0.2, maxOutput: 4096 },
   { match: "qwen3-coder", ctx: 65536, toolMode: "schema", editFormat: "auto", wholeFileMaxLines: 300, fim: QWEN_FIM, temperature: 0.3, maxOutput: 8192 },

@@ -1,0 +1,4 @@
+{
+  "task": "Rename the class ShoppingCart to Basket everywhere: its definition, its export and every use in src/ and test/.",
+  "check": "! grep -rq ShoppingCart src test && node --test"
+}

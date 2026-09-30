@@ -24,7 +24,7 @@ function splitSymbol(symbol: string): { name: string; parent?: string } {
 
 /** Workspace files that contain `word` as a whole word (ripgrep). */
 export function filesWithWord(ctx: ToolContext, word: string): Promise<string[]> {
-  const args = ["-l", "-w", "-F", "--color=never"];
+  const args = ["-l", "-w", "-F", "--color=never", "--path-separator=/"];
   for (const d of IGNORED_DIRS) args.push("--glob", `!${d}/`);
   args.push("--", word, ".");
   return new Promise((resolve) => {
