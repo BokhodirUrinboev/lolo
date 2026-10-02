@@ -144,23 +144,26 @@ function declaredNames(stmt: SyntaxNode): SyntaxNode[] {
  * function body that has it as a parameter: Node refuses to load the file ("Identifier 'i' has
  * already been declared"), while the grammar is fine with it.
  */
-function redeclarations(root: SyntaxNode): { name: string; line: number }[] {
-  const out: { name: string; line: number }[] = [];
+function redeclarations(root: SyntaxNode): { name: string; line: number; first: number }[] {
+  const out: { name: string; line: number; first: number }[] = [];
   for (const scope of [root, ...descendants(root, ["statement_block"])]) {
-    const names = new Set<string>();
+    const names = new Map<string, number>();
     const fn = scope.parent && FUNCTIONS.has(scope.parent.type) ? scope.parent : undefined;
     const params = fn && (field(fn, "parameters") ?? field(fn, "parameter"));
-    if (params) for (const p of patternNames(params)) names.add(p.text);
+    if (params) for (const p of patternNames(params)) names.set(p.text, p.startPosition.row + 1);
     for (const stmt of scope.namedChildren) {
       if (!stmt) continue;
       for (const n of declaredNames(stmt)) {
-        if (names.has(n.text)) out.push({ name: n.text, line: n.startPosition.row + 1 });
-        names.add(n.text);
+        const first = names.get(n.text);
+        if (first !== undefined) out.push({ name: n.text, line: n.startPosition.row + 1, first });
+        else names.set(n.text, n.startPosition.row + 1);
       }
     }
   }
   return out;
 }
+
+const IMPORT_LINE = /^(import\b|(const|let|var)\b.*=\s*require\()/;
 
 /** Parameter names of the functions around `n`, innermost first. */
 function paramsAround(n: SyntaxNode): string[] {
@@ -213,9 +216,21 @@ export async function jsRuntimeProblem(path: string, before: string | undefined,
 
   const again = found.again.find((r) => !had?.again.includes(r.name));
   if (again) {
+    const first = lineOf(again.first);
+    // A second import of a name: renaming one of them ("importedValidateEmail") breaks the code that uses it.
+    if (IMPORT_LINE.test(first) && IMPORT_LINE.test(lineOf(again.line))) {
+      // The one the file had before is the existing import, wherever the new one went.
+      const hadLines = new Set((before ?? "").replace(/\r\n/g, "\n").split("\n").map((l) => l.trim()));
+      const [old, added] = hadLines.has(lineOf(again.line)) && !hadLines.has(first) ? [again.line, again.first] : [again.first, again.line];
+      return (
+        `\`${again.name}\` is already imported at line ${old}: \`${lineOf(old)}\`, so the new line ${added} (\`${lineOf(added)}\`) would declare it twice ` +
+        `("Identifier '${again.name}' has already been declared"). Don't add a second import: if it should now come from another module, change line ${old}; ` +
+        `if line ${old} is already right, this change is done. The file was NOT changed.`
+      );
+    }
     return (
-      `\`${again.name}\` is declared a second time in the same block (line ${again.line}: \`${lineOf(again.line)}\`): Node refuses to load the file ` +
-      `("Identifier '${again.name}' has already been declared"). Use the existing \`${again.name}\`, or give the new one another name. The file was NOT changed.`
+      `\`${again.name}\` is declared a second time in the same block (line ${again.line}: \`${lineOf(again.line)}\`; line ${again.first} already declares it: \`${first}\`): ` +
+      `Node refuses to load the file ("Identifier '${again.name}' has already been declared"). Use the existing \`${again.name}\`, or give the new one another name. The file was NOT changed.`
     );
   }
   const self = found.self.find((s) => !had?.self.includes(s.text));

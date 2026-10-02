@@ -71,6 +71,8 @@ export interface AgentDeps {
   nested?: boolean;
   /** Run Claude Code hooks from .claude/settings*.json and ~/.claude/settings.json (default true). */
   claudeHooks?: boolean;
+  /** Offer the user's skills from ~/.claude/skills besides the workspace's (default true). */
+  userSkills?: boolean;
 }
 
 /** Repositories with at least this many code files get the explore tool for vague todos. */
@@ -245,7 +247,7 @@ export class Agent {
       const rules = await loadRules(host);
       // Claude Code setups: CLAUDE.md/AGENTS.md, skills, permissions (context/claudeSetup.ts).
       const instructions = await loadInstructions(host);
-      const skills = await listSkills(host);
+      const skills = await listSkills(host, this.deps.userSkills === false ? null : undefined);
       const wanted = skillsFor(task, skills);
       // A short follow-up ("och", "open it", "do it") continues the request before it: its skill still applies.
       if (!wanted.length && opts.conversation && task.trim().length <= 60) {
@@ -780,6 +782,8 @@ export class Agent {
         if (end) return end;
       }
     }
+    // Out of steps, like stuck: work that passes the checks is done, the model just didn't say so.
+    if (await checksPass(false)) return completeAuto("out of steps, but checks pass");
     return { ok: false, summary: `no result after ${stepLimit} steps` };
   }
 

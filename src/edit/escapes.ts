@@ -57,9 +57,18 @@ function rejoin(head: string, src: string[], from: number, lines: Set<string>): 
     for (let j = from; j < src.length && j < from + 6; j++) {
       const piece = src[j];
       if (!piece || /^\s/.test(piece)) break;
-      const glue = glues(k, pos).find((g) => k.startsWith(g + piece, pos));
-      if (glue === undefined) break;
-      pos += glue.length + piece.length;
+      // `[+]` for `\+`: the same regex, written without the escape JSON wouldn't take.
+      const as = [piece, piece.replace(/\[([.+*?()|{}^$\/])\]/g, "\\$1")];
+      let step: number | undefined;
+      for (const g of glues(k, pos)) {
+        const p = as.find((x) => k.startsWith(g + x, pos));
+        if (p !== undefined) {
+          step = g.length + p.length;
+          break;
+        }
+      }
+      if (step === undefined) break;
+      pos += step;
       if (pos === k.length) return { line: k, used: j - from + 1 };
     }
   }

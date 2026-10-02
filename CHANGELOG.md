@@ -9,6 +9,10 @@ Fixes for every failure of the 0.5.0 evaluation, done by code:
 - More edit repairs: a whole function or block replaced when only its first line was quoted (also with `edit_lines`), re-typed lines not left behind, a line range one line short, regex escapes lost in JSON, C# regex escapes (CS1009), missing `using` for the project's own types, placeholder namespaces.
 - No tests the user didn't ask for; no "move" done by hand instead of move_file; no reverting a change the user asked to keep; comment-only "fixes" and redone changes are no-ops.
 - Runaway replies that repeat a block of code are stopped early.
+- Skills: a word of a skill's name that the description uses only inside a longer name ("Code" in "Claude Code") no longer loads the skill on its own, so "fix the code" doesn't pull in a Claude Code hooks skill. "skill" in a skill's name doesn't match every message that says "skill". The eval no longer reads `~/.claude/skills`.
+- A second import of a name is refused with the line of the existing import ("change that line"); models renamed the new import instead.
+- Copied regexes: `[+]` written for `\+` is restored with the rest of the line.
+- A todo that runs out of steps is complete when its changes pass the checks, as when it gets stuck.
 
 Evaluation, 38 tasks × 2 runs, RTX 4070 Ti (Windows 11):
 

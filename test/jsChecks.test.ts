@@ -77,7 +77,12 @@ describe("jsRuntimeProblem", () => {
   it("refuses a second let/const of the same name in one block, or over a parameter", async () => {
     const test = 'const test = require("node:test");\nconst lib = require("../lib");\n\ntest("stock", () => {\n  const s = lib.create();\n  s.add(1);\n});\n';
     const again = test.replace("  s.add(1);", "  const s = lib.create();\n  s.add(1);");
-    expect(await jsRuntimeProblem("test/lib.test.js", test, again)).toMatch(/`s` is declared a second time in the same block \(line 6/);
+    expect(await jsRuntimeProblem("test/lib.test.js", test, again)).toMatch(/`s` is declared a second time in the same block \(line 6: `const s = lib.create\(\);`; line 5 already declares it/);
+    // A second import of a name points at the first one instead of suggesting a rename.
+    const shop = 'const { formatPrice } = require("./cart");\n\nfunction label(p) {\n  return formatPrice(p);\n}\nmodule.exports = { label };\n';
+    const twice = await jsRuntimeProblem("src/shop.js", shop, 'const { formatPrice } = require("./format");\n' + shop);
+    expect(twice).toMatch(/`formatPrice` is already imported at line 2: `const \{ formatPrice \} = require\("\.\/cart"\);`.*change line 2/);
+    expect(twice).not.toMatch(/another name/);
     expect(await jsRuntimeProblem("src/a.js", "", "function f(x) {\n  let x = 1;\n  return x;\n}\nmodule.exports = { f };\n")).toMatch(/`x` is declared a second time/);
     // A function in a default value binds its own parameters.
     expect(await jsRuntimeProblem("src/a.js", "", "function fade(p) {\n  const { duration = (d) => d * 30 } = p;\n  const d = 2;\n  return duration(d);\n}\nmodule.exports = { fade };\n")).toBeUndefined();

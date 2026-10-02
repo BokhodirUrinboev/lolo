@@ -441,6 +441,9 @@ module.exports = { validateEmail };
     expect(restoreCopiedEscapes(bare, [...users.split("\n"), phone]).text).toBe(
       String.raw`    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);` + "\n" + String.raw`    return /^\+?[0-9 ]{7,15}$/.test(phone);`,
     );
+    // `[+]` and `[.]` written for `\+` and `\.` (the same regex), next to `\d` lost as a line break.
+    const amount = String.raw`  if (!/^\+?\d+(\.\d+)?$/.test(amount)) return null;`;
+    expect(restoreCopiedEscapes("    if (!/^\n[+]?\n+([.]\n+)?$/.test(amount)) return null;", [amount])).toEqual({ text: "  " + amount, fixed: 1 });
     // Code that is really on several lines stays so.
     expect(restoreCopiedEscapes("foo(\n  bar);", ["foo(bar);"]).fixed).toBe(0);
     // `search` too, against the file being edited.

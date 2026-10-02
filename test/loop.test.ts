@@ -149,6 +149,19 @@ describe("agent loop", () => {
     expect(JSON.stringify(provider.seen.at(-1))).toMatch(/out of steps/);
   });
 
+  it("completes a todo that ran out of steps when its changes pass the checks", async () => {
+    const steps = [act("create_file", { path: "notes.txt", content: "hello\n" }), act("read_file", { path: "notes.txt" }), act("list_dir", {}), act("search", { query: "hello" }), act("search", { query: "bye" })];
+    const go = (check: string) => {
+      const { root } = workspace({ ".agent/rules.md": "- verify: node check.js\n", "check.js": check });
+      const provider = new Scripted([plan(["Write hello into notes.txt"]), ...steps]);
+      return new Agent({ host: new NodeHost(root, { autoApprove: true }), provider, commandAllowlist: [], trajectory: false, maxStepsPerTodo: 5 }).run("Write hello into notes.txt", "agent");
+    };
+    expect((await go("process.exit(0);\n")).status).toBe("done");
+    const failing = await go("process.exit(1);\n");
+    expect(failing.status).toBe("failed");
+    expect(failing.summary).toMatch(/no result after 5 steps/);
+  });
+
   it("reminds the model to act after five reads in a row", async () => {
     const { root } = workspace({ "a.txt": "x\n", "b.txt": "y\n" });
     const reads = [act("read_file", { path: "a.txt" }), act("read_file", { path: "b.txt" }), act("list_dir", {}), act("search", { query: "x" }), act("search", { query: "y" })];
