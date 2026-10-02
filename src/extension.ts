@@ -96,6 +96,8 @@ export function activate(context: vscode.ExtensionContext): LocalAgentApi {
         provider,
         commandAllowlist: cfg().get<string[]>("commandAllowlist", []),
         maxStepsPerTodo: cfg().get("maxStepsPerTodo", 15),
+        // Hooks run commands from the project's .claude/settings.json: only in a trusted workspace.
+        claudeHooks: cfg().get("claudeHooks", true) && vscode.workspace.isTrusted,
         embeddingModel: cfg().get<string>("embeddingModel", "") || undefined,
         web: await webConfig(context),
         mcp: mcpFor(folder),

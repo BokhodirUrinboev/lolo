@@ -210,7 +210,9 @@ export class ToolRegistry {
       args.path = r.path;
     }
     // Read before edit (as in Claude Code): models guess the lines of files they haven't seen.
-    if (ctx.seen && EDITS_EXISTING.has(tool.name) && typeof args.path === "string" && !ctx.seen.has(args.path) && (await ctx.host.stat(args.path)) === "file") {
+    // A generator's boilerplate (vite's App.vue) replaced as a whole needs no reading first.
+    const generated = tool.name === "rewrite_file" && typeof args.path === "string" && ctx.generated?.has(args.path);
+    if (ctx.seen && EDITS_EXISTING.has(tool.name) && !generated && typeof args.path === "string" && !ctx.seen.has(args.path) && (await ctx.host.stat(args.path)) === "file") {
       return { ok: false, policy: true, error: `You haven't read ${args.path} in this task. Read it first (read_file), then change it using its exact lines.` };
     }
     // "Move a.py to pkg/b.py": creating the target by hand leaves the old file and every import of it behind.

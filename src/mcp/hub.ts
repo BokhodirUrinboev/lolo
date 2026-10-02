@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { disabledMcpServers } from "../context/claudeSetup";
 import { truncateOutput } from "../tools/output";
 import { fail, ok, ToolContext, ToolDef } from "../tools/types";
 import { sanitizeSchema, shorten } from "./schema";
@@ -69,7 +70,14 @@ export function loadMcpConfig(
   extra: Record<string, McpServerConfig> = {},
   inherited: Record<string, McpServerConfig> = {},
 ): Record<string, McpServerConfig> {
-  const all = { ...inherited, ...readServers(path.join(root, ".vscode", "mcp.json")), ...readServers(path.join(root, MCP_CONFIG_PATH)), ...extra };
+  const all: Record<string, McpServerConfig> = {
+    ...inherited,
+    ...readServers(path.join(root, ".vscode", "mcp.json")),
+    ...readServers(path.join(root, ".mcp.json")), // Claude Code's project servers
+    ...readServers(path.join(root, MCP_CONFIG_PATH)),
+    ...extra,
+  };
+  for (const name of disabledMcpServers(root)) delete all[name];
   const expand = (v: string) =>
     v.replace(/\$\{workspaceFolder\}/g, root).replace(/\$\{env:(\w+)\}/g, (_, n: string) => process.env[n] ?? "");
   const out: Record<string, McpServerConfig> = {};
@@ -169,7 +177,7 @@ export class McpHub {
   private async connect(s: Server): Promise<void> {
     const c = s.config;
     try {
-      const client = new Client({ name: "agent-lolo", version: "0.5.0" });
+      const client = new Client({ name: "agent-lolo", version: "0.5.3" });
       const transport = c.url
         ? new StreamableHTTPClientTransport(new URL(c.url), { requestInit: { headers: c.headers } })
         : new StdioClientTransport({

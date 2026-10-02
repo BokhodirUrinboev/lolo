@@ -298,7 +298,7 @@ function ItemView({ item, turnId, running }: { item: Item; turnId: string; runni
         </Row>
       );
     case "tool":
-      return <ToolRow verb={TOOL_VERB[item.tool] ?? mcpLabel(item.tool)} target={item.target} summary={summaryOf(item.title)} ok={item.ok} output={item.output} />;
+      return <ToolRow verb={TOOL_VERB[item.tool] ?? mcpLabel(item.tool)} target={item.target} summary={summaryOf(item.title, item.target)} ok={item.ok} output={item.output} />;
     case "verify":
       return <ToolRow verb="Check" target={firstLine(item.output).replace(/^\$ /, "")} summary={item.ok ? "passed" : "failed"} ok={item.ok} output={item.output} openInitially={!item.ok} />;
     case "invalid":
@@ -872,8 +872,11 @@ function firstLine(s: string) {
 }
 
 /** "read_file src/a.ts: 21 lines; class Cart" → "21 lines; class Cart". */
-function summaryOf(title: string) {
-  const i = title.indexOf(": ");
+/** "run_command \"curl -H 'Authorization: Bearer x'\": exit 0" → "exit 0": the summary follows the target, which may contain ": ". */
+function summaryOf(title: string, target?: string) {
+  const at = target ? title.indexOf(target) : -1;
+  const from = at >= 0 ? at + target!.length : 0;
+  const i = title.indexOf(": ", from);
   return i >= 0 ? title.slice(i + 2) : title;
 }
 

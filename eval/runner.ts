@@ -108,6 +108,7 @@ async function run(argv: string[]) {
         host: new NodeHost(ws, { autoApprove: true, interactive: false, confirm: spec.approve ? async () => true : undefined }),
         provider,
         commandAllowlist: [...ALLOW, ...(spec.allow ?? [])],
+        claudeHooks: false, // the machine's own ~/.claude hooks would change the results
         maxStepsPerTodo: Number(values["max-steps"]),
         embeddingModel: values["embed-model"],
         web: spec.web ? { provider: "duckduckgo", replay: JSON.parse(readFileSync(path.join(dir, spec.web), "utf8")) as WebRecording } : undefined,

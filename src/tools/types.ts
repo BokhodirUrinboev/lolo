@@ -11,6 +11,8 @@ export interface ToolContext {
   profile: ModelProfile;
   edits: EditState;
   commandAllowlist: string[];
+  /** Command prefixes the project forbids (.claude/settings.json `deny`). */
+  commandDeny?: string[];
   signal?: AbortSignal;
   /** Answering a question: no edit hints, no write tools. */
   readOnly?: boolean;
@@ -42,6 +44,10 @@ export interface ToolContext {
   protectTests?: boolean;
   /** Files the model has seen this run (read, written, or given in the task): only these may be edited. Unset: no check. */
   seen?: Set<string>;
+  /** A PreToolUse hook approved the current call: commands run without asking. */
+  preApproved?: boolean;
+  /** Files a command created in this run (`npm create vite`, `dotnet new`): create_file/rewrite_file may replace them unread. */
+  generated?: Set<string>;
   /** Files moved by move_file in this run (old → new path): later todos about their imports may already be done. */
   moved?: Map<string, string>;
   /** Renames done by rename_symbol in this run (old → new): later todos about the same rename are already done. */

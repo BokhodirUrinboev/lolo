@@ -160,7 +160,7 @@ export const startProcess: ToolDef<{ command: string; cwd?: string; port?: numbe
   },
   async run(a, ctx) {
     const pm = ctx.processes!;
-    const decision = decideCommand(a.command, ctx.commandAllowlist);
+    const decision = decideCommand(a.command, ctx.commandAllowlist, ctx.commandDeny);
     if (decision.kind === "block") return fail(`Command blocked (${decision.reason}). Do not retry it.`, `start_process "${a.command}": blocked`);
     if (decision.kind === "confirm") {
       const reason = "starts in the background; stopped when the task ends";

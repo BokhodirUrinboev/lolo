@@ -39,7 +39,7 @@ export async function serveMcp(root: string): Promise<void> {
   const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: [] };
   const registry = new ToolRegistry();
 
-  const server = new Server({ name: "agent-lolo", version: "0.5.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "agent-lolo", version: "0.6.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       REPO_MAP,

@@ -2,7 +2,7 @@
   "name": "agent-lolo",
   "displayName": "Agent Lolo",
   "description": "Local-first AI coding agent for small local models (Ollama, llama.cpp, LM Studio): chat, plan & edit with diff approvals, checkpoints, inline edit, autocomplete. Nothing leaves your machine.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "nodirbek",
   "license": "MIT",
   "engines": {
@@ -170,7 +170,13 @@
         },
         "localAgent.maxStepsPerTodo": {
           "type": "number",
-          "default": 15
+          "default": 15,
+          "description": "Steps per todo. While edits keep applying, a todo may take up to 3× this."
+        },
+        "localAgent.claudeHooks": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run Claude Code hooks (`hooks` in `.claude/settings.json`, `.claude/settings.local.json`, `~/.claude/settings.json`): `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`. Only in trusted workspaces."
         },
         "localAgent.reviewPlan": {
           "type": "boolean",

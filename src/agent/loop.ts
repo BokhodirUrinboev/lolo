@@ -4,6 +4,7 @@ import { buildRepoMap } from "../context/repoMap";
 import { environmentInfo } from "../context/environment";
 import { expandMentions } from "../context/mentions";
 import { detectChecks, nestedProjectProblem } from "../context/projectChecks";
+import { claudePermissions, listSkills, loadInstructions, skillBlock, skillMentioned, skillsFor } from "../context/claudeSetup";
 import { loadRules, Rules } from "../context/rules";
 import { listFiles } from "../context/repoMap";
 import { SemanticIndex } from "../context/semanticIndex";
@@ -27,6 +28,7 @@ import { selectMcpTools } from "../mcp/select";
 import { Action, AgentMode, ToolRegistry } from "../tools/registry";
 import type { ToolContext, ToolDef, ToolResult } from "../tools/types";
 import { History, mergeConsecutive } from "./compaction";
+import { claudeTool, HookOutcome, Hooks } from "./hooks";
 import { statesConvention, toolNeeds } from "./needs";
 import { protectTests } from "./testGuard";
 import { makePlan } from "./planner";
@@ -67,6 +69,8 @@ export interface AgentDeps {
   mcp?: McpHub;
   /** Set for explore sub-runs: no nested explore. */
   nested?: boolean;
+  /** Run Claude Code hooks from .claude/settings*.json and ~/.claude/settings.json (default true). */
+  claudeHooks?: boolean;
 }
 
 /** Repositories with at least this many code files get the explore tool for vague todos. */
@@ -156,6 +160,8 @@ function mcpSummary(tools: McpToolDef[]): string {
   return [...byServer].map(([server, names]) => `- ${server}: ${names.slice(0, 30).join(", ")}${names.length > 30 ? ", ..." : ""}`).join("\n");
 }
 
+/** A Stop hook may send the run back to work this many times. */
+const MAX_STOP_BLOCKS = 2;
 /** Stop and ask the user after this many consecutive failed or invalid steps. */
 const MAX_CONSECUTIVE_FAILURES = 4;
 /**
@@ -237,6 +243,33 @@ export class Agent {
       emit({ type: "status", text: "Collecting context" });
       const budget = Budget.for(profile);
       const rules = await loadRules(host);
+      // Claude Code setups: CLAUDE.md/AGENTS.md, skills, permissions (context/claudeSetup.ts).
+      const instructions = await loadInstructions(host);
+      const skills = await listSkills(host);
+      const wanted = skillsFor(task, skills);
+      // A short follow-up ("och", "open it", "do it") continues the request before it: its skill still applies.
+      if (!wanted.length && opts.conversation && task.trim().length <= 60) {
+        const earlier = [...opts.conversation.matchAll(/^User: (.*)$/gm)].map((m) => m[1]).slice(-3).reverse();
+        wanted.push(...(earlier.map((m) => skillsFor(m, skills)).find((w) => w.length) ?? []));
+      }
+      if (wanted.length) log?.write("skills", { names: wanted.map((s) => s.name) });
+      const perms = await claudePermissions(host);
+      const hooks = this.deps.claudeHooks === false || this.deps.nested ? Hooks.empty(host.root) : await Hooks.load(host);
+      const session = { session_id: runId, transcript_path: log?.file ?? "" };
+      const warned = new Set<string>();
+      const hookNotes = (event: string, r: HookOutcome) => {
+        // Once per run: a hook that can't run here (powershell on Linux) would repeat after every command.
+        for (const w of r.warnings) if (!warned.has(w)) warned.add(w), emit({ type: "status", text: w });
+        if (r.block || r.context.length || r.warnings.length) log?.write("hook", { event, block: r.block, context: r.context, warnings: r.warnings });
+      };
+      let hookContext = "";
+      if (hooks.has("UserPromptSubmit")) {
+        emit({ type: "status", text: "Running UserPromptSubmit hooks" });
+        const r = await hooks.run("UserPromptSubmit", { ...session, prompt: task }, undefined, signal);
+        hookNotes("UserPromptSubmit", r);
+        if (r.block) return finish("cancelled", `A UserPromptSubmit hook blocked this message: ${r.block}`);
+        if (r.context.length) hookContext = `From the project's hooks:\n${r.context.join("\n\n")}`;
+      }
       const memory = (await host.stat(MEMORY_PATH)) === "file" ? memoryText(await host.readFile(MEMORY_PATH)) : "";
       const editorRaw = await host.editorContext?.();
       const editor = editorRaw && opts.excludeActiveFile ? { ...editorRaw, activeFile: undefined } : editorRaw;
@@ -260,12 +293,12 @@ export class Agent {
           (!t.available || t.available({ semantic } as ToolContext)) &&
           (t.name !== "done" || mode !== "ask"),
       );
-      const system = systemPrompt({ mode, model: provider.model, toolMode: profile.toolMode, environment: await environmentInfo(host.shell), toolList: this.registry.describe(modeTools), mcp: mcpSummary(mcpTools), rules: budget.fit("rules", rules.text), memory: budget.fit("rules", memory), verifyCommands: rules.verifyCommands, repoMap });
+      const system = systemPrompt({ mode, model: provider.model, toolMode: profile.toolMode, environment: await environmentInfo(host.shell), toolList: this.registry.describe(modeTools), mcp: mcpSummary(mcpTools), rules: budget.fit("rules", rules.text), memory: budget.fit("rules", memory), instructions: { text: budget.fit("instructions", instructions.text), sources: instructions.sources }, skills: skills.map((s) => `- ${s.name} (${s.path}): ${s.summary}`).join("\n"), verifyCommands: rules.verifyCommands, repoMap });
       const collected = await collectContext(host, editor, Math.floor(budget.tokens("files") / 3));
-      const context = [mentions.context, collected].filter(Boolean).join("\n\n");
+      const context = [mentions.context, collected, budget.fit("instructions", hookContext)].filter(Boolean).join("\n\n");
       const prefix: ChatMessage[] = [
         { role: "system", content: system },
-        { role: "user", content: taskMessage(task, context, opts.conversation), ...(opts.images?.length ? { images: opts.images } : {}) },
+        { role: "user", content: taskMessage(task, context, opts.conversation, wanted.map((s) => budget.fit("files", skillBlock(s), Math.floor(budget.tokens("files") / 2)))), ...(opts.images?.length ? { images: opts.images } : {}) },
       ];
       const history = new History();
 
@@ -294,6 +327,12 @@ export class Agent {
           emit({ type: "status", text: "Answering" });
         } else {
           todos = plan.todos;
+          // The user asked for a skill but the plan ignores it (7B models do): its steps come first.
+          const missing = wanted.filter((sk) => !todos.some((t) => skillMentioned(t, sk)));
+          if (missing.length) {
+            todos = [...missing.map((sk) => `Do what the ${sk.name} skill says for this request: ${sk.summary}`), ...todos].slice(0, 6);
+            plan.messages[1] = { role: "assistant", content: JSON.stringify({ goal: plan.goal, kind: plan.kind, reply: "", todos }) };
+          }
           emit({ type: "plan", todos, goal: plan.goal });
           if (mode === "plan") return finish("planned", todos.map((t, i) => `${i + 1}. ${t}`).join("\n"));
           const reviewed = this.deps.reviewPlan ? await this.deps.reviewPlan(todos) : todos;
@@ -320,7 +359,7 @@ export class Agent {
       }
 
       // 4. Execute todos.
-      const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: this.deps.commandAllowlist, signal, readOnly: execMode === "ask", processes, semantic,
+      const ctx: ToolContext = { host, profile, edits: new EditState(), commandAllowlist: [...this.deps.commandAllowlist, ...perms.allow], commandDeny: perms.deny, signal, readOnly: execMode === "ask", processes, semantic,
         web: this.deps.web,
         message: task,
         protectTests: protectTests(task),
@@ -332,9 +371,10 @@ export class Agent {
       };
       const summaries: string[] = [];
       const checksPending = { value: false };
+      let stops = 0;
       for (let i = 0; i < todos.length; i++) {
         emit({ type: "todo", index: i, status: "active" });
-        const outcome = await this.runTodo(i, todos, execMode, { prefix, history, ctx, rules, budget, stats, changed, emit, log, signal, task, checksPending });
+        const outcome = await this.runTodo(i, todos, execMode, { prefix, history, ctx, rules, budget, stats, changed, emit, log, signal, task, checksPending, hooks, session, hookNotes });
         if (!outcome.ok) {
           emit({ type: "todo", index: i, status: "failed" });
           return finish("failed", [...summaries, `Stopped at todo ${i + 1} (${todos[i]}): ${outcome.summary}`].join("\n"));
@@ -342,6 +382,17 @@ export class Agent {
         emit({ type: "todo", index: i, status: "done" });
         summaries.push(execMode === "ask" || todos.length === 1 ? outcome.summary : `${i + 1}. ${outcome.summary}`);
         if (i + 1 < todos.length) history.note(todoPrompt(i + 1, todos));
+        else if (execMode === "agent" && stops < MAX_STOP_BLOCKS && hooks.has("Stop")) {
+          // A Stop hook may say the work isn't finished (tests fail, a step was skipped): that becomes a todo.
+          const r = await hooks.run("Stop", { ...session, stop_hook_active: stops > 0 }, undefined, signal);
+          hookNotes("Stop", r);
+          if (r.block) {
+            stops++;
+            todos.push(`Fix what the project's Stop hook reported: ${r.block.split("\n")[0].slice(0, 200)}`);
+            emit({ type: "plan", todos });
+            history.note(`The project's Stop hook says the work is not finished:\n${r.block}\n\n${todoPrompt(i + 1, todos)}`);
+          }
+        }
       }
       return finish("done", summaries.join("\n"));
     } catch (e) {
@@ -371,6 +422,9 @@ export class Agent {
       task: string;
       /** Checks failed at an earlier todo and were deferred: they run at every done until they pass. */
       checksPending: { value: boolean };
+      hooks: Hooks;
+      session: Record<string, unknown>;
+      hookNotes: (event: string, r: HookOutcome) => void;
     },
   ): Promise<{ ok: boolean; summary: string }> {
     const { history, ctx, stats, emit, log } = s;
@@ -484,7 +538,13 @@ export class Agent {
     for (let step = 0; step < stepLimit; step++) {
       if (s.signal?.aborted) throw new Cancelled();
       // Progress = edits apply and nothing failed lately (edit → failing build → edit is thrashing, not progress).
-      if (step === stepLimit - 1 && step - lastProgress <= 3 && step - lastFailure > 3 && stepLimit < maxSteps * 2) stepLimit += 5;
+      if (step === stepLimit - 1 && step - lastProgress <= 3 && step - lastFailure > 3 && stepLimit < maxSteps * 3) stepLimit += 5;
+      // Question mode, last steps: answer from what was read instead of failing with nothing.
+      if (mode === "ask" && !answerNow && step === stepLimit - 2) {
+        answerNow = true;
+        log?.write("stuck", { forceAnswer: true, stepLimit });
+        history.note("Stop looking: you are out of steps. Call answer now with the best answer from what you found above.");
+      }
       stats.steps++;
 
       const compacted = history.compactIfNeeded(historyBudget);
@@ -585,6 +645,22 @@ export class Agent {
       }
       seen.add(key);
 
+      // Claude Code PreToolUse hooks: may refuse the call (the reason goes to the model) or approve it.
+      const asClaude = tool.kind === "control" ? undefined : claudeTool(tool.name, args, host.root, (tool as McpToolDef).mcp);
+      ctx.preApproved = false;
+      if (asClaude && s.hooks.has("PreToolUse", asClaude.name)) {
+        const r = await s.hooks.run("PreToolUse", { ...s.session, tool_name: asClaude.name, tool_input: asClaude.input }, asClaude.name, s.signal);
+        s.hookNotes("PreToolUse", r);
+        if (r.block) {
+          stats.refusedCalls++;
+          failures++;
+          emit({ type: "invalid", error: `blocked by a PreToolUse hook: ${r.block}` });
+          history.add(assistant, `Not run: the project's PreToolUse hook blocked this call:\n${r.block}`, `${tool.name}: blocked by hook`);
+          continue;
+        }
+        ctx.preApproved = !!r.allow;
+      }
+
       // done: verify the todo's changes before accepting.
       if (tool.name === "done" || tool.name === "answer") {
         const summary = String(args.summary ?? args.text);
@@ -642,6 +718,20 @@ export class Agent {
       if (!result.ok && !result.noop) lastFailure = step;
 
       let observation = result.output;
+      ctx.preApproved = false;
+      // Claude Code PostToolUse hooks (after a successful call): their feedback goes to the model.
+      if (asClaude && result.ok && s.hooks.has("PostToolUse", asClaude.name)) {
+        emit({ type: "status", text: `Running PostToolUse hooks for ${asClaude.name}` });
+        const response = asClaude.name === "Bash" ? { stdout: result.output, stderr: "", interrupted: false } : { success: true, output: result.output.slice(0, 20000) };
+        const r = await s.hooks.run("PostToolUse", { ...s.session, tool_name: asClaude.name, tool_input: asClaude.input, tool_response: response }, asClaude.name, s.signal);
+        s.hookNotes("PostToolUse", r);
+        if (r.block) {
+          lastFailure = step;
+          emit({ type: "verify", ok: false, output: r.block });
+          observation += `\n\nThe project's PostToolUse hook reported a problem:\n${r.block}`;
+        }
+        if (r.context.length) observation += `\n\n${r.context.join("\n")}`;
+      }
       if (result.changed?.length) {
         // run_command may change files too (added using directives): not an edit call of the model.
         if (tool.kind === "write") {

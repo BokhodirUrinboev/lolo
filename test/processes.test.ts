@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -67,6 +67,43 @@ describe("start_process", () => {
     expect(plain.output).not.toContain("background");
   });
 
+  it("doesn't take a command that only names vite (npm install vite@5) for a server", async () => {
+    const { ctx } = setup();
+    ctx.commandAllowlist = ["echo"];
+    for (const command of ["echo npm create vite@latest app -- --template vue-ts", "echo npm install vue@3 vite@5"]) {
+      const r = await tool("run_command").run({ command }, ctx);
+      expect(r.ok, command).toBe(true);
+      expect(r.output, command).not.toContain("background");
+    }
+  });
+
+  it("runs `cd dir && ...` from the root when cwd is already that dir", async () => {
+    const { ctx } = setup();
+    mkdirSync(path.join(ctx.host.root, "web"));
+    writeFileSync(path.join(ctx.host.root, "web", "a.txt"), "x");
+    ctx.commandAllowlist = ["cd", "ls"];
+    const r = await tool("run_command").run({ command: "cd web && ls", cwd: "web" }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("a.txt");
+  });
+
+  it("lets create_file and rewrite_file replace files a generator made in this run, unread", async () => {
+    const { ctx } = setup();
+    ctx.commandAllowlist = ["mkdir", "printf"];
+    ctx.seen = new Set();
+    await tool("run_command").run({ command: "mkdir -p app/src && printf '<template></template>\\n' > app/src/App.vue && printf 'x\\n' > app/src/main.ts" }, ctx);
+    const reg = new ToolRegistry();
+    const create = await reg.check({ thought: "", tool: "create_file", args: { path: "app/src/App.vue", content: "<template><router-view /></template>\n" } }, ALL_TOOLS, ctx);
+    expect(create.ok).toBe(true);
+    if (create.ok) expect((await create.tool.run(create.args, ctx)).ok).toBe(true);
+    expect(readFileSync(path.join(ctx.host.root, "app/src/App.vue"), "utf8")).toContain("router-view");
+    const rewrite = await reg.check({ thought: "", tool: "rewrite_file", args: { path: "app/src/main.ts", content: "console.log(1);\n" } }, ALL_TOOLS, ctx);
+    expect(rewrite.ok).toBe(true);
+    // A file the user had is still protected.
+    const own = await reg.check({ thought: "", tool: "create_file", args: { path: "server.js", content: "x\n" } }, ALL_TOOLS, ctx);
+    expect(own.ok).toBe(false);
+  });
+
   it("run_command starts servers in the background instead of refusing them", async () => {
     const { ctx, processes } = setup();
     writeFileSync(path.join(ctx.host.root, "package.json"), JSON.stringify({ scripts: { dev: "node server.js" } }));
@@ -107,5 +144,24 @@ describe("listenUrl", () => {
     expect(listenUrl(log)).toBe("http://localhost:5291");
     expect(listenUrl("  ➜  Local:   http://127.0.0.1:5173/")).toBe("http://127.0.0.1:5173");
     expect(listenUrl("see https://docs.example.com/page")).toBeUndefined();
+  });
+});
+
+describe("nodeBin", () => {
+  it("finds nvm's default node when PATH has none", async () => {
+    const { nodeBin } = await import("../src/host/shell");
+    if (process.platform === "win32") return;
+    const home = mkdtempSync(path.join(tmpdir(), "lolo-home-"));
+    for (const v of ["v18.20.1", "v22.3.0", "v24.21.0"]) mkdirSync(path.join(home, ".nvm", "versions", "node", v, "bin"), { recursive: true });
+    mkdirSync(path.join(home, ".nvm", "alias"));
+    writeFileSync(path.join(home, ".nvm", "alias", "default"), "22\n");
+    const saved = process.env.NVM_DIR;
+    delete process.env.NVM_DIR;
+    try {
+      expect(nodeBin("/usr/bin/none", home)).toBe(path.join(home, ".nvm", "versions", "node", "v22.3.0", "bin"));
+      expect(nodeBin(path.dirname(process.execPath), home)).toBeUndefined(); // node already on PATH
+    } finally {
+      if (saved !== undefined) process.env.NVM_DIR = saved;
+    }
   });
 });

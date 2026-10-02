@@ -14,7 +14,8 @@ describe("user slash commands", () => {
   const host = new NodeHost(root);
 
   it("lists commands with descriptions from front matter or the first line", async () => {
-    expect(await listSlashCommands(host)).toEqual([
+    // Skills from ~/.claude/skills depend on the machine.
+    expect((await listSlashCommands(host)).filter((c) => !c.description.startsWith("Skill: "))).toEqual([
       { name: "add-tests", description: "Write unit tests" },
       { name: "review", description: "Review a file for bugs" }, // the project's own replaces the built-in
       { name: "commit-message", description: "Write a commit message for my uncommitted changes" },

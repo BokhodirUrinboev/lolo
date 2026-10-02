@@ -118,6 +118,26 @@ async function mustBeFile(path: string, ctx: ToolContext): Promise<string | unde
   return undefined;
 }
 
+/** `.env`, `.env.local`, `prod.env` (not `.env.example`): secrets that must not reach the model or the logs. */
+export function isSecretsFile(path: string): boolean {
+  const name = path.split("/").pop()!;
+  return /^\.env(\.[\w-]+)?$|\.env$/.test(name) && !/example|sample|template|dist/i.test(name);
+}
+
+/** Variable names with their values hidden: the model needs the names, the shell or a script reads the values. */
+export function maskSecrets(path: string, text: string): string {
+  const lines = text.replace(/\r\n/g, "\n").split("\n").map((l) => {
+    const m = /^(\s*(?:export\s+)?[\w.]+\s*=)\s*(.*)$/.exec(l);
+    if (!m) return l;
+    const v = m[2].replace(/^["']|["']$/g, "");
+    return `${m[1]}<${v ? `set, ${v.length} chars` : "empty"}>`;
+  });
+  return (
+    `${path} (values hidden; they are secrets):\n${lines.join("\n")}\n` +
+    "[Use the variables without reading their values: in a Python script, parse this file and use the values directly; in a shell command, load it first with `set -a && . ./.env && set +a`.]"
+  );
+}
+
 export const readFile: ToolDef<{ path: string; start_line?: number; end_line?: number }> = {
   name: "read_file",
   kind: "read",
@@ -130,6 +150,7 @@ export const readFile: ToolDef<{ path: string; start_line?: number; end_line?: n
   check: (a, ctx) => mustBeFile(a.path, ctx),
   async run(a, ctx) {
     const raw = await ctx.host.readFile(a.path);
+    if (isSecretsFile(a.path)) return ok(maskSecrets(a.path, raw), `read_file ${a.path}: ${raw.split("\n").filter((l) => /^\s*[\w.]+\s*=/.test(l)).length} variables (values hidden)`);
     // An empty file shown as just the edit hint made models copy the hint into `search`.
     if (!raw.trim()) {
       const how = ctx.readOnly ? "" : ` To fill it, use rewrite_file with the complete content.`;
@@ -660,7 +681,14 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
   params: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   async check(a, ctx) {
     fixEscapes(a);
-    if (await ctx.host.stat(a.path)) return `"${a.path}" already exists. Use edit to change it.`;
+    if (await ctx.host.stat(a.path)) {
+      // A file a generator made in this run (vite's App.vue): the model writes the real one over it.
+      if (ctx.generated?.has(a.path)) {
+        const before = await ctx.host.readFile(a.path);
+        return stubIn(a.content, before, a.path, ctx.todo) ?? wholeFileModules(a, before, ctx);
+      }
+      return `"${a.path}" already exists. Use edit to change it.`;
+    }
     const base = a.path.split("/").pop()!;
     if (/^\.(slnx?|csproj|fsproj|cs|py|js|ts|tsx|json|go|rs|java)$/.test(base)) {
       return `"${base}" has no file name, only an extension. Name it (e.g. TodoApi${base})${/sln/.test(base) ? ", or better run `dotnet new sln -n <Name>` and `dotnet sln add <project>`" : ""}.`;
@@ -673,5 +701,8 @@ export const createFile: ToolDef<{ path: string; content: string }> = {
     }
     return placeholderIn(a.content, "", a.path, ctx.todo) ?? wholeFileModules(a, "", ctx);
   },
-  run: (a, ctx) => write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), true, `create_file ${a.path}`, escapeNote(a)),
+  run: async (a, ctx) => {
+    const replaces = (await ctx.host.stat(a.path)) === "file";
+    return write(ctx, a.path, collapseBlankRuns(toLf(a.content), 2), !replaces, `create_file ${a.path}${replaces ? " (replaced the generated file)" : ""}`, escapeNote(a));
+  },
 };

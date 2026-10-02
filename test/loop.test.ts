@@ -137,6 +137,18 @@ describe("agent loop", () => {
     expect(JSON.stringify(plain.schemas[1])).not.toContain('"remember"');
   });
 
+  it("answers a question from what it read when the steps run out, instead of failing", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 20; i++) files[`f${i}.txt`] = `line ${i}\n`;
+    const { root } = workspace(files);
+    // Only `answer` is offered for the last two steps (the real model is held to it by the schema).
+    const reads = Array.from({ length: 13 }, (_, i) => act("read_file", { path: `f${i}.txt` }));
+    const provider = new Scripted([{ goal: "g", kind: "question", reply: "", todos: [] }, ...reads, act("answer", { text: "f7.txt" })]);
+    const r = await new Agent({ host: new NodeHost(root, { autoApprove: true }), provider, commandAllowlist: [], trajectory: false }).run("where is line 7?", "agent");
+    expect(r.status).not.toBe("failed");
+    expect(JSON.stringify(provider.seen.at(-1))).toMatch(/out of steps/);
+  });
+
   it("reminds the model to act after five reads in a row", async () => {
     const { root } = workspace({ "a.txt": "x\n", "b.txt": "y\n" });
     const reads = [act("read_file", { path: "a.txt" }), act("read_file", { path: "b.txt" }), act("list_dir", {}), act("search", { query: "x" }), act("search", { query: "y" })];
@@ -268,5 +280,19 @@ describe("agent loop", () => {
     expect(JSON.stringify(provider.seen[2])).toMatch(/haven't read src\/a.js/);
     expect(read("src/a.js")).toBe("exports.a = 2;\n");
     expect(r.status).toBe("done");
+  });
+
+  it("brings a requested skill to follow-ups and puts its steps first when the plan leaves it out", async () => {
+    const skill = "---\nname: jira-task-tracker\ndescription: Track work in Jira via REST API.\n---\nAsk the user first for small tasks. Create the issue with curl.";
+    const { root } = workspace({ ".claude/skills/jira-task-tracker/SKILL.md": skill, "Form.razor": "<p/>\n" });
+    const provider = new Scripted([plan(["Ask user if Jira should be opened for this small task", "Fix the field error in Form.razor"]), act("done", { summary: "a" })]);
+    const agent = new Agent({ host: new NodeHost(root, { autoApprove: true }), provider, commandAllowlist: [], trajectory: false });
+    const conversation = "User: jira skill orqali jira task ochishing kerak edi\nAssistant: Jira ochaymi? (taxminiy: 1 kun)";
+    const r = await agent.run("och", "agent", undefined, { conversation });
+    const planPrompt = JSON.stringify(provider.seen[0]);
+    expect(planPrompt).toContain("Create the issue with curl"); // the skill came from the earlier message
+    expect(planPrompt).toContain("that is their confirmation");
+    expect(r.todos[0]).toMatch(/^Do what the jira-task-tracker skill says/); // "Ask user ..." was dropped
+    expect(r.todos).not.toContain("Ask user if Jira should be opened for this small task");
   });
 });
