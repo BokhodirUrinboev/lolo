@@ -7,6 +7,7 @@ import { jsRuntimeProblem } from "../edit/jsChecks";
 import { pyRuntimeProblem } from "../edit/pyChecks";
 import { checkEditSyntax, findImbalance, fixCSharpEscapes, syntaxRepairs } from "../edit/syntaxGuard";
 import { collapseBlankRuns, detectEol, fromLf, maxBlankRun, numberLines, toLf } from "../edit/text";
+import { unusedImportNote } from "../edit/unusedImports";
 import { exportShapeProblem, moduleSystemMismatch, moduleSystemProblem, toCommonJs, undefinedExports } from "./moduleSystem";
 import { committedVersion } from "./gitTools";
 import { placeholderNamespaceFix } from "./missingImports";
@@ -472,6 +473,7 @@ async function write(ctx: ToolContext, path: string, content: string, isNew: boo
   if (outcome.note) {
     return ok(`${isNew ? "Created" : "Edited"} ${path}, but ${outcome.note}, so the file differs from your proposal. Re-read it before editing again.`, `${reason}: partly applied (${outcome.note})`, [path]);
   }
+  note += unusedImportNote(path, before, content);
   return ok(`${isNew ? "Created" : "Edited"} ${path}.${note}`, `${reason}: applied`, [path]);
 }
 

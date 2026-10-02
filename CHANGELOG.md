@@ -13,6 +13,7 @@ Fixes for every failure of the 0.5.0 evaluation, done by code:
 - A second import of a name is refused with the line of the existing import ("change that line"); models renamed the new import instead.
 - Copied regexes: `[+]` written for `\+` is restored with the rest of the line.
 - A todo that runs out of steps is complete when its changes pass the checks, as when it gets stuck.
+- A write that adds an import the file never uses says so ("imports `dataclass` but doesn't use it anywhere yet").
 
 Evaluation, 38 tasks × 2 runs, RTX 4070 Ti (Windows 11):
 
